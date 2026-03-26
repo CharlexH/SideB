@@ -1,0 +1,9 @@
+{
+  "label": "Spotify",
+  "label.ch.lang": "Spotify",
+  "icon": "",
+  "icontop": "ic-spotify.png",
+  "launch": "launch.sh",
+  "description": "Spotify Connect Receiver",
+  "description.ch.lang": "Spotify Connect 播放器"
+}

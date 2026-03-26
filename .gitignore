@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+
+# go-librespot source (use pre-built binary from releases)
+go-librespot/
+go-librespot_linux_arm64.tar.gz
+
+# Binaries in package (download separately)
+package/SpotifyConnect/go-librespot
+package/SpotifyConnect/spotify-ui
+
+# Large resource files (see README for download instructions)
+package/SpotifyConnect/resources/font.ttf
+package/SpotifyConnect/resources/ca-certificates.crt
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out

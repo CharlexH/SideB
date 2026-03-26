@@ -1,0 +1,15 @@
+device_name: "TrimUI Brick"
+device_type: "speaker"
+audio_backend: "alsa"
+audio_device: "default"
+bitrate: 160
+volume_steps: 100
+initial_volume: 80
+zeroconf_enabled: true
+credentials:
+  type: "zeroconf"
+server:
+  enabled: true
+  address: "0.0.0.0"
+  port: 3678
+log_level: "info"
