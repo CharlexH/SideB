@@ -1,128 +1,124 @@
 # TrimUI Spotify Connect
 
-A Spotify Connect receiver for the [TrimUI Brick](https://trimui.com) handheld gaming device. Turns your TrimUI Brick into a Spotify Connect speaker with a real-time album art display and hardware button controls.
+Turn a TrimUI Brick into a Spotify Connect receiver with a native fullscreen UI.  
+This project pairs `go-librespot` for playback with a custom Go framebuffer app for album art, transport state, and hardware button control. 🎵
 
-## Features
+## What it does
 
-- Appears as a Spotify Connect device ("TrimUI Brick") on your local network
-- Displays album cover art, track name, and artist name on the 1024x768 screen
-- Hardware button controls:
-  - **A** — Play / Pause
-  - **B** / **MENU** — Exit
-  - **Left** / **Right** — Previous / Next track
-  - **Up** / **Down** — Volume up / down
-- Real-time metadata updates via WebSocket
-- Pure Go framebuffer rendering — no SDL2 or X11 required
-- Double-buffered display for flicker-free rendering
+- 📡 Shows up in Spotify as a Connect device on your local network
+- 🖼️ Renders cover art and playback state directly to `/dev/fb0`
+- 🎮 Uses TrimUI hardware buttons for play, pause, skip, volume, and exit
+- 🔌 Runs without SDL, X11, or a desktop stack
+- 🧩 Ships as a simple `Apps/SpotifyConnect` folder for the SD card
 
 ## Requirements
 
-- TrimUI Brick with CrossMix OS 1.1.1+
-- Wi-Fi connection on the same network as your Spotify client
-- Spotify Premium account
+- TrimUI Brick
+- CrossMix OS `1.1.1+`
+- Spotify Premium
+- Wi-Fi on the same network as your phone or desktop Spotify client
 
-## Architecture
+## Repo layout
 
-```
-┌─────────────────────┐     ┌──────────────────────┐
-│   Spotify App        │     │   TrimUI Brick        │
-│   (Phone/Desktop)    │────▶│                       │
-│                      │     │  go-librespot (3678)  │
-│   Spotify Connect    │     │    ▲           │      │
-└─────────────────────┘     │    │ WebSocket  │ ALSA │
-                             │    │           ▼      │
-                             │  spotify-ui ──▶ Audio │
-                             │    │                  │
-                             │    ▼                  │
-                             │  /dev/fb0 (display)   │
-                             └──────────────────────┘
+```text
+spotify-ui/                    Go UI source
+package/SpotifyConnect/        Deployable app folder for the SD card
+package/SpotifyConnect/data/   Runtime config and persisted state
+package/SpotifyConnect/resources/ UI images and fonts
 ```
 
-- **[go-librespot](https://github.com/devgianlu/go-librespot)** — Open-source Spotify Connect receiver with HTTP API and WebSocket events
-- **spotify-ui** — Pure Go framebuffer UI that renders album art and handles input via `/dev/input/event*`
+`launch.sh` copies the binaries to `/tmp` before starting them, because the SD card is mounted as `vfat` and can't execute binaries directly.
 
-## Installation
+## Controls
 
-### Download Release
+- `A`: Play / pause
+- `Left` / `Right`: Previous / next track
+- `Up` / `Down`: Volume down / up
+- `B` or `MENU`: Exit
 
-Download the latest release archive and extract it to your SD card:
+## Build
 
-```
-/mnt/SDCARD/Apps/SpotifyConnect/
-├── config.json          # TrimUI app metadata
-├── launch.sh            # Startup script
-├── go-librespot         # Spotify Connect backend
-├── spotify-ui           # Framebuffer UI
-├── data/
-│   └── config.yml       # go-librespot config
-└── resources/
-    ├── ca-certificates.crt  # Mozilla CA bundle
-    └── font.ttf             # UI font
-```
-
-### Build from Source
-
-**Prerequisites:** Go 1.21+
+### 1. Build the UI
 
 ```bash
-# Clone
 git clone https://github.com/CharlexH/trimui-spotify.git
-cd trimui-spotify
-
-# Build UI binary (cross-compile for ARM64)
-cd spotify-ui
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../build/spotify-ui .
-
-# Download go-librespot ARM64 binary from:
-# https://github.com/devgianlu/go-librespot/releases/latest
-
-# Download CA certificates:
-curl -o resources/ca-certificates.crt https://curl.se/ca/cacert.pem
-
-# Copy the full SpotifyConnect folder to your SD card:
-# /mnt/SDCARD/Apps/SpotifyConnect/
+cd trimui-spotify/spotify-ui
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../package/SpotifyConnect/spotify-ui .
 ```
 
-## Usage
+### 2. Add `go-librespot`
 
-1. Launch **Spotify** from the TrimUI Brick app menu
-2. The app will start the backend and wait for a Spotify Connect connection
-3. Open Spotify on your phone or computer
-4. Tap the **Connect** icon and select **"TrimUI Brick"**
-5. Music plays through the TrimUI Brick speaker; album art and controls appear on screen
+Download an ARM64 `go-librespot` binary from:
+
+`https://github.com/devgianlu/go-librespot/releases/latest`
+
+Then place it at:
+
+```text
+package/SpotifyConnect/go-librespot
+```
+
+### 3. Add missing runtime files
+
+The packaged app expects:
+
+- `package/SpotifyConnect/resources/ca-certificates.crt`
+- `package/SpotifyConnect/resources/font.ttf`
+
+These are intentionally not tracked in git because they are large third-party assets.
+
+## Deploy
+
+Copy `package/SpotifyConnect` to your SD card:
+
+```text
+/mnt/SDCARD/Apps/SpotifyConnect/
+```
+
+The final folder should contain:
+
+```text
+config.json
+launch.sh
+go-librespot
+spotify-ui
+data/config.yml
+resources/
+```
+
+Launch `Spotify` from the TrimUI app menu, then pick `TrimUI Brick` from Spotify Connect on another device. ✅
 
 ## Configuration
 
-Edit `data/config.yml` to customize go-librespot settings:
+Main config lives in [`package/SpotifyConnect/data/config.yml`](package/SpotifyConnect/data/config.yml).
 
 ```yaml
-device_name: "TrimUI Brick"    # Name shown in Spotify Connect
+device_name: "TrimUI Brick"
 device_type: "speaker"
 audio_backend: "alsa"
 audio_device: "default"
-bitrate: 160                   # 96, 160, or 320 kbps
+bitrate: 160
 volume_steps: 100
 initial_volume: 80
+zeroconf_enabled: true
 ```
 
-See [go-librespot documentation](https://github.com/devgianlu/go-librespot) for all options.
+The UI talks to the local `go-librespot` API at `http://127.0.0.1:3678`.
 
-## Technical Details
+## Runtime flow
 
-- **Display**: Direct framebuffer rendering to `/dev/fb0` (1024x768, BGRA 32bpp)
-- **Input**: Linux evdev from `/dev/input/event3` (gamepad) and `/dev/input/event0` (keyboard)
-- **Audio**: ALSA via go-librespot
-- **Network**: Zeroconf/mDNS for device discovery, HTTP API on port 3678
-- **No CGO**: Pure Go cross-compilation — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64`
+1. `launch.sh` kills any stale process.
+2. It copies `go-librespot` and `spotify-ui` to `/tmp`.
+3. `go-librespot` starts with `data/config.yml`.
+4. The script waits for the local API to come up.
+5. `spotify-ui` connects over HTTP/WebSocket and renders the playback UI.
 
-## Acknowledgments
+## Credits
 
-- [go-librespot](https://github.com/devgianlu/go-librespot) by devgianlu — the Spotify Connect backend
-- [TrimUI](https://trimui.com) — the hardware platform
-- [CrossMix OS](https://github.com/cizia64/CrossMix-OS) — the custom firmware
+- [`go-librespot`](https://github.com/devgianlu/go-librespot) for the Spotify Connect backend
+- [TrimUI](https://trimui.com) for the hardware
+- [CrossMix OS](https://github.com/cizia64/CrossMix-OS) for the firmware base
 
 ## License
 
-This project is licensed under the Apache License 2.0 — see [LICENSE](LICENSE) for details.
-
-go-librespot is licensed separately under its own terms.
+Apache-2.0. See [LICENSE](LICENSE).

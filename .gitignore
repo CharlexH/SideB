@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # Build artifacts
 build/
 
@@ -21,3 +24,6 @@ package/SpotifyConnect/resources/ca-certificates.crt
 *.dylib
 *.test
 *.out
+
+# Local binaries
+spotify-ui/spotify-ui
