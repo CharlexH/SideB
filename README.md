@@ -1,7 +1,7 @@
 # TrimUI Spotify Connect
 
 Turn a TrimUI Brick into a Spotify Connect receiver with a native fullscreen UI.  
-This project pairs `go-librespot` for playback with a custom Go framebuffer app for album art, transport state, and hardware button control. 🎵
+This project pairs `go-librespot` for playback with a native framebuffer UI for album art, transport state, and hardware button control. The current packaged UI is written in Rust, while the original Go implementation is kept in-tree as a reference. 🎵
 
 ## What it does
 
@@ -21,7 +21,8 @@ This project pairs `go-librespot` for playback with a custom Go framebuffer app 
 ## Repo layout
 
 ```text
-spotify-ui/                    Go UI source
+spotify-ui/                    Legacy Go UI source
+spotify-ui-rs/                 Current Rust UI source
 package/SpotifyConnect/        Deployable app folder for the SD card
 package/SpotifyConnect/data/   Runtime config and persisted state
 package/SpotifyConnect/resources/ UI images and fonts
@@ -39,6 +40,17 @@ package/SpotifyConnect/resources/ UI images and fonts
 ## Build
 
 ### 1. Build the UI
+
+The deployable `package/SpotifyConnect/spotify-ui` binary should be built from the Rust UI:
+
+```bash
+git clone https://github.com/CharlexH/trimui-spotify.git
+cd trimui-spotify/spotify-ui-rs
+cargo build --release --target aarch64-unknown-linux-musl
+cp target/aarch64-unknown-linux-musl/release/spotify-ui ../package/SpotifyConnect/spotify-ui
+```
+
+The legacy Go UI is still available for comparison and fallback:
 
 ```bash
 git clone https://github.com/CharlexH/trimui-spotify.git
@@ -112,6 +124,34 @@ The UI talks to the local `go-librespot` API at `http://127.0.0.1:3678`.
 3. `go-librespot` starts with `data/config.yml`.
 4. The script waits for the local API to come up.
 5. `spotify-ui` connects over HTTP/WebSocket and renders the playback UI.
+
+## Debug notes
+
+### Cover switching regression notes
+
+This project hit a noticeable cover-switching regression during the Rust rewrite. The symptom was not just "slow downloads" — already cached covers also failed to appear immediately.
+
+The main causes were:
+
+- The Rust UI originally kept the previous `scene_cover` visible while the next track's cover was still pending. That meant the old album art could stay on screen for seconds.
+- Cached covers were being read from disk correctly, but applying them could still block on the shared `render_state` lock. On-device logs showed `cache hit` followed by `applied from cache` several seconds later, which confirmed lock contention rather than cache failure.
+- HTTPS cover downloads still use external `curl` on-device. This is slower and less predictable than the old Go UI's in-process HTTP client, but it remains the current implementation because the cross-compile toolchain for `aarch64-unknown-linux-musl` cannot currently absorb a `rustls/ring` dependency without extra linker tooling.
+
+The current Rust behavior should be:
+
+- When track metadata changes, the old cover is cleared immediately instead of lingering on screen.
+- If the next cover is already cached in `/tmp/spotify-ui-cover-cache`, it is decoded and applied synchronously.
+- Cover logs are written to `/tmp/spotify-ui.log` with `cache hit`, `fetch done`, `decoded`, `applied`, and `render-state lock waited` markers so device-side timing can be diagnosed without rebuilding.
+
+If cover switching regresses again, inspect:
+
+```bash
+tail -n 200 /tmp/spotify-ui.log
+ls -l /tmp/spotify-ui-cover-cache
+curl -s http://127.0.0.1:3678/status
+```
+
+If the log shows `cache hit` followed much later by `applied from cache`, the problem is render-state contention, not network fetch latency.
 
 ## Credits
 

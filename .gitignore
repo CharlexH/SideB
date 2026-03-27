@@ -1,5 +1,6 @@
 # macOS
 .DS_Store
+.worktrees/
 
 # Build artifacts
 build/
@@ -27,3 +28,4 @@ package/SpotifyConnect/resources/ca-certificates.crt
 
 # Local binaries
 spotify-ui/spotify-ui
+spotify-ui-rs/target/

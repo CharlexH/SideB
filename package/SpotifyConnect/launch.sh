@@ -4,7 +4,6 @@ cd "$progdir"
 
 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$progdir:/usr/trimui/lib"
 export SSL_CERT_FILE="$progdir/resources/ca-certificates.crt"
-export GOTRACEBACK=crash
 
 echo 1 > /tmp/stay_awake
 echo 1 > /tmp/stay_alive
