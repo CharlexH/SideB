@@ -141,6 +141,44 @@ fn sync_scene_mode(render_state: &mut RenderState, last_connected: bool, connect
     }
 }
 
+fn truncate_chars_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+
+    chars.into_iter().take(max_chars - 1).chain(std::iter::once('…')).collect()
+}
+
+fn format_track_info(track_name: &str, artist_name: &str, max_chars: usize) -> Option<String> {
+    let track_name = track_name.trim();
+    let artist_name = artist_name.trim();
+
+    let text = if track_name.is_empty() && artist_name.is_empty() {
+        return None;
+    } else if artist_name.is_empty() {
+        track_name.to_string()
+    } else if track_name.is_empty() {
+        artist_name.to_string()
+    } else {
+        format!("{track_name} - {artist_name}")
+    };
+
+    Some(truncate_chars_with_ellipsis(&text, max_chars))
+}
+
+fn centered_text_x(screen_width: i32, text_width: i32) -> i32 {
+    ((screen_width - text_width).max(0)) / 2
+}
+
 /// Holds all pre-computed scene buffers and caches.
 pub struct RenderState {
     pub scene_base: Vec<u8>,
@@ -298,6 +336,12 @@ impl RenderState {
         self.applied_cover_url = Some(cover_url.to_string());
         self.rebuild_playing_scene(Some(cover));
         true
+    }
+
+    pub fn replace_cover(&mut self, cover_url: &str, cover: &RgbaImage) {
+        self.requested_cover_url = Some(cover_url.to_string());
+        self.applied_cover_url = Some(cover_url.to_string());
+        self.rebuild_playing_scene(Some(cover));
     }
 
     /// Rebuild the waiting scene (static cassette + "Waiting..." text).
@@ -609,6 +653,22 @@ pub fn render_loop(
                     255,
                     fonts.scale_large,
                 );
+
+                if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30) {
+                    let info_w = fonts.measure_text(&info_text, fonts.scale_large);
+                    let info_x = centered_text_x(SCREEN_W as i32, info_w);
+
+                    fonts.draw_text(
+                        back_buf,
+                        &info_text,
+                        info_x,
+                        STATUS_BASELINE_Y,
+                        255,
+                        255,
+                        255,
+                        fonts.scale_large,
+                    );
+                }
             }
 
             if full_redraw {
@@ -677,6 +737,37 @@ mod tests {
         assert_eq!(
             plan.sleep,
             Duration::from_nanos(1_000_000_000 / BASE_ANIM_FPS)
+        );
+    }
+
+    #[test]
+    fn track_info_is_combined_without_truncation_when_short_enough() {
+        assert_eq!(
+            format_track_info("239", "perquel", 30).as_deref(),
+            Some("239 - perquel")
+        );
+    }
+
+    #[test]
+    fn centered_text_x_uses_full_screen_width() {
+        assert_eq!(centered_text_x(1024, 200), 412);
+        assert_eq!(centered_text_x(1024, 1024), 0);
+    }
+
+    #[test]
+    fn track_info_is_truncated_to_thirty_characters_with_ellipsis() {
+        assert_eq!(
+            format_track_info("落日", "椎名林檎", 30).as_deref(),
+            Some("落日 - 椎名林檎")
+        );
+        assert_eq!(
+            format_track_info(
+                "这是非常长非常长非常长的歌曲名字版本二",
+                "这是很长很长的歌手名字版本二",
+                30
+            )
+            .as_deref(),
+            Some("这是非常长非常长非常长的歌曲名字版本二 - 这是很长很长的…")
         );
     }
 
@@ -818,6 +909,28 @@ mod tests {
             &back_buf[cover_offset..cover_offset + 4],
             &[50, 100, 200, 255]
         );
+    }
+
+    #[test]
+    fn replace_cover_swaps_visible_cover_in_one_step() {
+        let mut rs = empty_render_state();
+
+        let mut old_cover = RgbaImage::new(1, 1);
+        old_cover.set_pixel(0, 0, 200, 100, 50, 255);
+        rs.replace_cover("https://img/cover-a", &old_cover);
+
+        let mut new_cover = RgbaImage::new(1, 1);
+        new_cover.set_pixel(0, 0, 20, 220, 40, 255);
+        rs.full_redraw = false;
+        rs.replace_cover("https://img/cover-b", &new_cover);
+
+        assert_eq!(rs.requested_cover_url.as_deref(), Some("https://img/cover-b"));
+        assert_eq!(rs.applied_cover_url.as_deref(), Some("https://img/cover-b"));
+        assert!(rs.scene_cover.is_some());
+
+        let cover = rs.scene_cover.as_ref().unwrap();
+        assert_eq!(cover.pixel_at(0, 0), (20, 220, 40, 255));
+        assert!(rs.full_redraw);
     }
 
     #[test]

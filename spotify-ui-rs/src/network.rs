@@ -298,18 +298,25 @@ where
     Some(bytes)
 }
 
+fn load_cached_cover_from(
+    url: &str,
+    cache_root: &Path,
+) -> Option<RgbaImage> {
+    let bytes = match read_cover_cache(cache_root, url) {
+        Some(bytes) => bytes,
+        None => return None,
+    };
+
+    resources::decode_image_bytes(&bytes)
+}
+
 fn apply_cached_cover_if_present_from(
     url: &str,
     cache_root: &Path,
     render_state: &Arc<Mutex<RenderState>>,
 ) -> bool {
     let started = Instant::now();
-    let bytes = match read_cover_cache(cache_root, url) {
-        Some(bytes) => bytes,
-        None => return false,
-    };
-
-    let img = match resources::decode_image_bytes(&bytes) {
+    let img = match load_cached_cover_from(url, cache_root) {
         Some(img) => img,
         None => return false,
     };
@@ -420,15 +427,33 @@ fn spawn_cover_fetch(url: String, render_state: Arc<Mutex<RenderState>>) {
 }
 
 fn update_cover(cover_url: Option<&str>, render_state: &Arc<Mutex<RenderState>>) {
+    let cache_root = cover_cache_root();
+
+    if let Some(url) = cover_url.filter(|url| !url.is_empty()) {
+        if let Some(img) = load_cached_cover_from(url, &cache_root) {
+            let started = Instant::now();
+            let mut rs = lock_render_state_for_update(render_state);
+
+            if rs.applied_cover_url.as_deref() == Some(url) && rs.scene_cover.is_some() {
+                return;
+            }
+
+            rs.replace_cover(url, &img);
+            eprintln!(
+                "cover {} swapped from cache in {} ms",
+                cover_log_key(url),
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+    }
+
     let action = {
         let mut rs = lock_render_state_for_update(render_state);
         rs.plan_cover_update(cover_url)
     };
 
     if let CoverUpdate::Fetch(url) = action {
-        if apply_cached_cover_if_present_from(&url, &cover_cache_root(), render_state) {
-            return;
-        }
         spawn_cover_fetch(url, Arc::clone(render_state));
     }
 }
@@ -570,14 +595,14 @@ fn handle_event(
             }
         }
 
-        "playing" => {
+        "playing" | "will_play" => {
             mark_status_sync_boost(state, Instant::now());
             let mut st = state.lock().unwrap();
             st.set_paused(false);
             st.last_pos_time = Instant::now();
         }
 
-        "paused" | "not_playing" => {
+        "paused" | "not_playing" | "will_pause" => {
             let mut st = state.lock().unwrap();
             st.set_paused(true);
         }
@@ -686,6 +711,23 @@ mod tests {
         let st = state.lock().unwrap();
         assert!(st.paused);
         assert!(!st.render_dirty);
+    }
+
+    #[test]
+    fn will_pause_event_switches_to_paused_state() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let render_state = empty_render_state();
+        {
+            let mut st = state.lock().unwrap();
+            st.paused = false;
+            st.render_dirty = false;
+        }
+
+        handle_event(make_event("will_pause", None), &state, &render_state);
+
+        let st = state.lock().unwrap();
+        assert!(st.paused);
+        assert!(st.render_dirty);
     }
 
     #[test]

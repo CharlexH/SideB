@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
 
+use jpeg_decoder::{ImageInfo as JpegImageInfo, PixelFormat};
+
 use crate::types::RgbaImage;
 
 /// Build candidate paths for a resource file, matching Go logic.
@@ -111,23 +113,62 @@ pub fn decode_image_bytes(data: &[u8]) -> Option<RgbaImage> {
 
     // Try JPEG
     let mut decoder = jpeg_decoder::Decoder::new(data);
-    if let Ok(pixels_rgb) = decoder.decode() {
-        let info = decoder.info().unwrap();
-        let w = info.width as u32;
-        let h = info.height as u32;
-        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-        for chunk in pixels_rgb.chunks(3) {
-            rgba.extend_from_slice(chunk);
-            rgba.push(255);
+    if let Ok(decoded_pixels) = decoder.decode() {
+        if let Some(info) = decoder.info() {
+            return decode_jpeg_to_rgba(decoded_pixels, info);
         }
-        return Some(RgbaImage {
-            pixels: rgba,
-            width: w,
-            height: h,
-        });
     }
 
     None
+}
+
+fn decode_jpeg_to_rgba(decoded_pixels: Vec<u8>, info: JpegImageInfo) -> Option<RgbaImage> {
+    let w = info.width as u32;
+    let h = info.height as u32;
+    let pixel_count = (w as usize).checked_mul(h as usize)?;
+    let mut rgba = Vec::with_capacity(pixel_count.checked_mul(4)?);
+
+    match info.pixel_format {
+        PixelFormat::L8 => {
+            if decoded_pixels.len() != pixel_count {
+                return None;
+            }
+            for gray in decoded_pixels {
+                rgba.extend_from_slice(&[gray, gray, gray, 255]);
+            }
+        }
+        PixelFormat::RGB24 => {
+            if decoded_pixels.len() != pixel_count.checked_mul(3)? {
+                return None;
+            }
+            for chunk in decoded_pixels.chunks_exact(3) {
+                rgba.extend_from_slice(chunk);
+                rgba.push(255);
+            }
+        }
+        PixelFormat::CMYK32 => {
+            if decoded_pixels.len() != pixel_count.checked_mul(4)? {
+                return None;
+            }
+            for chunk in decoded_pixels.chunks_exact(4) {
+                let c = chunk[0] as u16;
+                let m = chunk[1] as u16;
+                let y = chunk[2] as u16;
+                let k = chunk[3] as u16;
+                let r = 255u16.saturating_sub((c + k).min(255)) as u8;
+                let g = 255u16.saturating_sub((m + k).min(255)) as u8;
+                let b = 255u16.saturating_sub((y + k).min(255)) as u8;
+                rgba.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+        PixelFormat::L16 => return None,
+    }
+
+    Some(RgbaImage {
+        pixels: rgba,
+        width: w,
+        height: h,
+    })
 }
 
 /// Load font data from candidate paths. Returns the raw bytes.
@@ -151,4 +192,27 @@ pub fn load_font_data() -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jpeg_decoder::CodingProcess;
+
+    #[test]
+    fn grayscale_jpeg_pixels_expand_to_rgba() {
+        let info = JpegImageInfo {
+            width: 2,
+            height: 1,
+            pixel_format: PixelFormat::L8,
+            coding_process: CodingProcess::DctSequential,
+        };
+
+        let img = decode_jpeg_to_rgba(vec![0x11, 0x88], info).unwrap();
+
+        assert_eq!(img.width, 2);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.pixel_at(0, 0), (0x11, 0x11, 0x11, 255));
+        assert_eq!(img.pixel_at(1, 0), (0x88, 0x88, 0x88, 255));
+    }
 }
