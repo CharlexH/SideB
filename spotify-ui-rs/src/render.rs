@@ -7,9 +7,12 @@ use crate::animation;
 use crate::app::AppState;
 use crate::constants::*;
 use crate::drawing;
+use crate::favorites::FavoritesManager;
 use crate::font::FontSet;
 use crate::framebuffer::Framebuffer;
 use crate::image_ops;
+use crate::mode::AppMode;
+use crate::playlist_view;
 use crate::types::RgbaImage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +196,10 @@ pub struct RenderState {
     pub cover_mask: Option<RgbaImage>,
     pub img_playing: Option<RgbaImage>,
     pub img_paused: Option<RgbaImage>,
+    pub img_spotify_on: Option<RgbaImage>,
+    pub img_spotify_off: Option<RgbaImage>,
+    pub img_fav_on: Option<RgbaImage>,
+    pub img_fav_off: Option<RgbaImage>,
     pub requested_cover_url: Option<String>,
     pub applied_cover_url: Option<String>,
 }
@@ -207,6 +214,10 @@ impl RenderState {
         cover_mask: Option<RgbaImage>,
         img_playing: Option<RgbaImage>,
         img_paused: Option<RgbaImage>,
+        img_spotify_on: Option<RgbaImage>,
+        img_spotify_off: Option<RgbaImage>,
+        img_fav_on: Option<RgbaImage>,
+        img_fav_off: Option<RgbaImage>,
         fonts: &FontSet,
     ) -> Self {
         let overlay_window = image_ops::build_overlay_window(tape_a);
@@ -227,6 +238,10 @@ impl RenderState {
             cover_mask,
             img_playing,
             img_paused,
+            img_spotify_on,
+            img_spotify_off,
+            img_fav_on,
+            img_fav_off,
             requested_cover_url: None,
             applied_cover_url: None,
         };
@@ -246,7 +261,8 @@ impl RenderState {
             "NEXT [\u{2192}]",
             "VOL+ [\u{2191}]",
             "VOL- [\u{2193}]",
-            "PLAY / PAUSE [A]",
+            "FAV [Y]",
+            "PLAY [A]",
             "EXIT [B]",
         ];
 
@@ -439,11 +455,11 @@ pub fn render(
     render_state: &mut RenderState,
 ) {
     // Snapshot state
-    let (paused, connected, position, duration, wheel_angle, _soundwave_bars) = {
+    let (_paused, mode, position, duration, wheel_angle, _soundwave_bars) = {
         let st = app_state.lock().unwrap();
         (
             st.paused,
-            st.connected,
+            st.mode,
             st.position,
             st.duration,
             st.wheel_angle,
@@ -451,7 +467,7 @@ pub fn render(
         )
     };
 
-    if !connected {
+    if mode == crate::mode::AppMode::Waiting {
         back_buf.copy_from_slice(&render_state.scene_waiting);
         return;
     }
@@ -525,20 +541,7 @@ pub fn render(
         drawing::draw_image_alpha(back_buf, cover, COVER_X, COVER_Y);
     }
 
-    // Draw status indicator
-    let indicator = if paused {
-        &render_state.img_paused
-    } else {
-        &render_state.img_playing
-    };
-    if let Some(img) = indicator {
-        drawing::draw_image_alpha(back_buf, img, STATUS_LAMP_X, STATUS_LAMP_Y);
-    } else {
-        drawing::draw_status_dot(back_buf, STATUS_DOT_X, STATUS_DOT_Y);
-    }
-
-    // Status text needs fonts — we'll use the global font set
-    // (handled by the render_loop caller)
+    // Status icons are now drawn in the text overlay section of render_loop
 
     render_state.full_redraw = false;
 }
@@ -551,9 +554,11 @@ pub fn render_loop(
     render_state: Arc<Mutex<RenderState>>,
     fonts: &FontSet,
     quit: Arc<AtomicBool>,
+    favorites: Arc<Mutex<FavoritesManager>>,
 ) {
     let mut last_frame = Instant::now();
     let mut last_connected = false;
+    let mut last_playlist_visible = false;
     let mut animation_mode = AnimationMode::new();
 
     loop {
@@ -565,21 +570,30 @@ pub fn render_loop(
         let dt = now.duration_since(last_frame);
         last_frame = now;
 
-        let (connected, paused, dirty);
+        let (mode, paused, dirty, playlist_visible);
         {
             let mut st = app_state.lock().unwrap();
-            connected = st.connected;
+            mode = st.mode;
             paused = st.paused;
             dirty = st.render_dirty;
+            playlist_visible = st.playlist_visible;
 
-            if st.connected && !st.paused {
+            // Animate wheels when playing (Spotify or Local)
+            let playing = match mode {
+                AppMode::Spotify => !st.paused,
+                AppMode::Local => !st.paused,
+                AppMode::Waiting => false,
+            };
+
+            if playing {
                 st.wheel_angle = (st.wheel_angle
                     + 2.0 * std::f64::consts::PI * dt.as_secs_f64()
                         / WHEEL_ROTATION_PERIOD.as_secs_f64())
                     % (2.0 * std::f64::consts::PI);
             }
 
-            if st.connected && !st.paused && st.duration > 0 {
+            // Advance position for Spotify mode (local position is tracked by LocalPlayer)
+            if mode == AppMode::Spotify && !st.paused && st.duration > 0 {
                 st.position += dt.as_millis() as i64;
                 if st.position > st.duration {
                     st.position = st.duration;
@@ -588,14 +602,23 @@ pub fn render_loop(
             }
         }
 
+        // For scene mode sync, treat Local as connected (shows playing scene)
+        let scene_connected = mode != AppMode::Waiting;
         let full_redraw = {
             let mut rs = render_state.lock().unwrap();
-            sync_scene_mode(&mut rs, last_connected, connected);
+            sync_scene_mode(&mut rs, last_connected, scene_connected);
+            // Force full redraw when playlist overlay is dismissed
+            if last_playlist_visible && !playlist_visible {
+                rs.full_redraw = true;
+            }
             rs.full_redraw
         };
-        last_connected = connected;
+        last_connected = scene_connected;
+        last_playlist_visible = playlist_visible;
+
+        let scene_playing = mode != AppMode::Waiting;
         let plan = frame_plan(
-            connected,
+            scene_connected,
             paused,
             dirty,
             full_redraw,
@@ -603,7 +626,7 @@ pub fn render_loop(
         );
 
         if !plan.should_render {
-            if !connected || paused {
+            if !scene_playing || paused {
                 animation_mode.reset(now);
             }
             std::thread::sleep(plan.sleep);
@@ -611,67 +634,100 @@ pub fn render_loop(
         }
 
         let render_started = Instant::now();
-        if !connected {
+        if mode == AppMode::Waiting {
             let mut rs = render_state.lock().unwrap();
             if rs.full_redraw || dirty {
                 back_buf.copy_from_slice(&rs.scene_waiting);
+
+                // Playlist overlay on waiting screen
+                if playlist_visible {
+                    render_playlist(back_buf, &app_state, &favorites, fonts);
+                }
+
                 fb.swap_buffers(back_buf);
                 rs.full_redraw = false;
             }
             drop(rs);
             app_state.lock().unwrap().render_dirty = false;
         } else {
+            // Spotify or Local mode — show cassette playing scene
             let mut rs = render_state.lock().unwrap();
             let full_redraw = rs.full_redraw;
             render(back_buf, &app_state, &mut rs);
             drop(rs);
 
-            // Draw text overlay (status + time remaining)
+            // Draw bottom bar overlay (icons + track info + time)
             {
                 let st = app_state.lock().unwrap();
-                let status = if st.paused { "PAUSED" } else { "PLAYING" };
-                fonts.draw_text(
-                    back_buf,
-                    status,
-                    STATUS_TEXT_X,
-                    STATUS_BASELINE_Y,
-                    255,
-                    255,
-                    255,
-                    fonts.scale_large,
-                );
+                let rs = render_state.lock().unwrap();
 
+                // Left side: Spotify connection icon
+                let spotify_icon = if st.connected {
+                    &rs.img_spotify_on
+                } else {
+                    &rs.img_spotify_off
+                };
+                if let Some(img) = spotify_icon {
+                    drawing::draw_image_alpha(back_buf, img, SPOTIFY_ICON_X, BAR_ICON_Y);
+                }
+
+                // Left side: favorite icon
+                if !st.current_track_uri.is_empty() {
+                    let fav_icon = if st.is_favorited {
+                        &rs.img_fav_on
+                    } else {
+                        &rs.img_fav_off
+                    };
+                    if let Some(img) = fav_icon {
+                        drawing::draw_image_alpha(back_buf, img, FAV_ICON_X, BAR_ICON_Y);
+                    }
+                }
+
+                // Right side: time remaining
                 let time_remaining = animation::format_duration(st.duration - st.position);
                 let tr_w = fonts.measure_text(&time_remaining, fonts.scale_large);
+                let time_x = SCREEN_W as i32 - 28 - tr_w;
                 fonts.draw_text(
                     back_buf,
                     &time_remaining,
-                    SCREEN_W as i32 - 28 - tr_w,
+                    time_x,
                     STATUS_BASELINE_Y,
-                    255,
-                    255,
-                    255,
+                    255, 255, 255,
                     fonts.scale_large,
                 );
 
+                // Right side: play/pause icon (left of time)
+                let play_icon = if st.paused {
+                    &rs.img_paused
+                } else {
+                    &rs.img_playing
+                };
+                if let Some(img) = play_icon {
+                    let icon_x = time_x - PLAY_ICON_MARGIN - BAR_ICON_SIZE;
+                    drawing::draw_image_alpha(back_buf, img, icon_x, BAR_ICON_Y);
+                }
+
+                // Center: track info
                 if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30) {
                     let info_w = fonts.measure_text(&info_text, fonts.scale_large);
                     let info_x = centered_text_x(SCREEN_W as i32, info_w);
-
                     fonts.draw_text(
                         back_buf,
                         &info_text,
                         info_x,
                         STATUS_BASELINE_Y,
-                        255,
-                        255,
-                        255,
+                        255, 255, 255,
                         fonts.scale_large,
                     );
                 }
             }
 
-            if full_redraw {
+            // Playlist overlay on playing screen
+            if playlist_visible {
+                render_playlist(back_buf, &app_state, &favorites, fonts);
+            }
+
+            if full_redraw || playlist_visible {
                 fb.swap_buffers(back_buf);
             } else {
                 let dirty_rects: [(usize, usize, usize, usize); 3] = [
@@ -687,7 +743,7 @@ pub fn render_loop(
             app_state.lock().unwrap().render_dirty = false;
         }
 
-        if connected && !paused {
+        if scene_playing && !paused {
             animation_mode.record_render(render_started.elapsed(), Instant::now());
         } else {
             animation_mode.reset(now);
@@ -699,6 +755,30 @@ pub fn render_loop(
             std::thread::sleep(plan.sleep - elapsed);
         }
     }
+}
+
+/// Render the playlist overlay onto the back buffer.
+fn render_playlist(
+    buf: &mut [u8],
+    app_state: &Arc<Mutex<AppState>>,
+    favorites: &Arc<Mutex<FavoritesManager>>,
+    fonts: &FontSet,
+) {
+    let st = app_state.lock().unwrap();
+    let selected = st.playlist_selected;
+    let playing_uri = st.current_track_uri.clone();
+    drop(st);
+
+    let fav = favorites.lock().unwrap();
+    let entries = fav.all_entries().to_vec();
+    drop(fav);
+
+    let uri_ref = if playing_uri.is_empty() {
+        None
+    } else {
+        Some(playing_uri.as_str())
+    };
+    playlist_view::render_playlist_overlay(buf, &entries, selected, uri_ref, fonts);
 }
 
 #[cfg(test)]
@@ -718,6 +798,10 @@ mod tests {
             cover_mask: None,
             img_playing: None,
             img_paused: None,
+            img_spotify_on: None,
+            img_spotify_off: None,
+            img_fav_on: None,
+            img_fav_off: None,
             requested_cover_url: None,
             applied_cover_url: None,
         }

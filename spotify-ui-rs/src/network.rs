@@ -176,6 +176,11 @@ fn fetch_status(
 
     let now = Instant::now();
 
+    // Don't let status polling overwrite UI state during local playback
+    if state.lock().unwrap().mode == crate::mode::AppMode::Local {
+        return;
+    }
+
     if let Some(track) = &status.track {
         let cover_url = prefer_high_res_cover_url(&track.album_cover_url);
         {
@@ -426,7 +431,7 @@ fn spawn_cover_fetch(url: String, render_state: Arc<Mutex<RenderState>>) {
     });
 }
 
-fn update_cover(cover_url: Option<&str>, render_state: &Arc<Mutex<RenderState>>) {
+pub fn update_cover(cover_url: Option<&str>, render_state: &Arc<Mutex<RenderState>>) {
     let cache_root = cover_cache_root();
 
     if let Some(url) = cover_url.filter(|url| !url.is_empty()) {
@@ -463,12 +468,13 @@ pub fn listen_events(
     state: Arc<Mutex<AppState>>,
     render_state: Arc<Mutex<RenderState>>,
     quit: Arc<AtomicBool>,
+    cmd_tx: std::sync::mpsc::Sender<crate::mode::InputAction>,
 ) {
     loop {
         if quit.load(Ordering::Relaxed) {
             return;
         }
-        connect_websocket(&state, &render_state, &quit);
+        connect_websocket(&state, &render_state, &quit, &cmd_tx);
         std::thread::sleep(Duration::from_secs(2));
     }
 }
@@ -530,6 +536,7 @@ fn connect_websocket(
     state: &Arc<Mutex<AppState>>,
     render_state: &Arc<Mutex<RenderState>>,
     quit: &Arc<AtomicBool>,
+    cmd_tx: &std::sync::mpsc::Sender<crate::mode::InputAction>,
 ) {
     fetch_status(state, render_state, None);
 
@@ -562,7 +569,7 @@ fn connect_websocket(
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            handle_event(ev, state, render_state);
+            handle_event(ev, state, render_state, cmd_tx);
         }
     }
 }
@@ -571,6 +578,7 @@ fn handle_event(
     ev: WSEvent,
     state: &Arc<Mutex<AppState>>,
     render_state: &Arc<Mutex<RenderState>>,
+    cmd_tx: &std::sync::mpsc::Sender<crate::mode::InputAction>,
 ) {
     eprintln!("event: {}", ev.event_type);
 
@@ -580,8 +588,9 @@ fn handle_event(
                 if let Ok(meta) = serde_json::from_str::<MetadataEvent>(data.get()) {
                     mark_status_sync_boost(state, Instant::now());
                     let cover_url = prefer_high_res_cover_url(&meta.album_cover_url);
-                    {
+                    let track_changed = {
                         let mut st = state.lock().unwrap();
+                        let changed = st.current_track_uri != meta.uri;
                         st.current_track_uri = meta.uri;
                         st.track_name = meta.name;
                         st.artist_name = meta.artist_names.join(", ");
@@ -589,8 +598,12 @@ fn handle_event(
                         st.set_duration(meta.duration);
                         st.set_position(meta.position, Instant::now());
                         st.set_connected(true);
-                    }
+                        changed
+                    };
                     update_cover(Some(&cover_url), render_state);
+                    if track_changed {
+                        let _ = cmd_tx.send(crate::mode::InputAction::SpotifyTrackChanged);
+                    }
                 }
             }
         }
@@ -598,24 +611,31 @@ fn handle_event(
         "playing" | "will_play" => {
             mark_status_sync_boost(state, Instant::now());
             let mut st = state.lock().unwrap();
-            st.set_paused(false);
-            st.last_pos_time = Instant::now();
+            if st.mode != crate::mode::AppMode::Local {
+                st.set_paused(false);
+                st.last_pos_time = Instant::now();
+            }
         }
 
         "paused" | "not_playing" | "will_pause" => {
             let mut st = state.lock().unwrap();
-            st.set_paused(true);
+            if st.mode != crate::mode::AppMode::Local {
+                st.set_paused(true);
+            }
         }
 
         "stopped" => {
-            {
+            let is_local = state.lock().unwrap().mode == crate::mode::AppMode::Local;
+            if !is_local {
                 let mut st = state.lock().unwrap();
                 st.set_paused(true);
                 st.track_name.clear();
                 st.artist_name.clear();
                 st.set_connected(false);
+                drop(st);
+                update_cover(None, render_state);
             }
-            update_cover(None, render_state);
+            let _ = cmd_tx.send(crate::mode::InputAction::SpotifyDeactivated);
         }
 
         "volume" => {
@@ -644,17 +664,21 @@ fn handle_event(
                 st.set_connected(true);
             }
             fetch_status(state, render_state, None);
+            let _ = cmd_tx.send(crate::mode::InputAction::SpotifyActivated);
         }
 
         "inactive" => {
-            {
+            let is_local = state.lock().unwrap().mode == crate::mode::AppMode::Local;
+            if !is_local {
                 let mut st = state.lock().unwrap();
                 st.set_connected(false);
                 st.current_track_uri.clear();
                 st.track_name.clear();
                 st.artist_name.clear();
+                drop(st);
+                update_cover(None, render_state);
             }
-            update_cover(None, render_state);
+            let _ = cmd_tx.send(crate::mode::InputAction::SpotifyDeactivated);
         }
 
         _ => {}

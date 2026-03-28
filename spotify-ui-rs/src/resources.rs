@@ -21,6 +21,7 @@ pub fn resource_candidates(name: &str) -> Vec<PathBuf> {
     add(Path::new("resources").join(name));
     add(Path::new("package/SpotifyConnect/resources").join(name));
     add(Path::new("../package/SpotifyConnect/resources").join(name));
+    add(Path::new("/mnt/SDCARD/Apps/SpotifyConnect/resources").join(name));
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -29,6 +30,16 @@ pub fn resource_candidates(name: &str) -> Vec<PathBuf> {
     }
 
     paths
+}
+
+/// Find the first existing resource file path.
+pub fn find_resource(name: &str) -> Option<PathBuf> {
+    for path in resource_candidates(name) {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Load a PNG image from resource candidates.

@@ -1,9 +1,11 @@
 use std::time::Instant;
 
+use crate::mode::AppMode;
 use crate::types::RgbaImage;
 
 /// Mutable application state protected by a Mutex.
 pub struct AppState {
+    // -- Spotify playback --
     pub current_track_uri: String,
     pub track_name: String,
     pub artist_name: String,
@@ -21,6 +23,16 @@ pub struct AppState {
     pub soundwave_goals: [f64; 24],
     pub status_sync_boost_until: Instant,
     pub render_dirty: bool,
+
+    // -- Mode & local playback --
+    pub mode: AppMode,
+    pub is_favorited: bool,
+    pub local_was_playing: bool,
+
+    // -- Playlist overlay --
+    pub playlist_visible: bool,
+    pub playlist_selected: usize,
+    pub playlist_count: usize,
 }
 
 impl AppState {
@@ -47,6 +59,14 @@ impl AppState {
             soundwave_goals: goals,
             status_sync_boost_until: Instant::now(),
             render_dirty: false,
+
+            mode: AppMode::default(),
+            is_favorited: false,
+            local_was_playing: false,
+
+            playlist_visible: false,
+            playlist_selected: 0,
+            playlist_count: 0,
         }
     }
 
@@ -90,6 +110,41 @@ impl AppState {
             self.render_dirty = true;
         }
     }
+
+    pub fn set_mode(&mut self, mode: AppMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn set_favorited(&mut self, favorited: bool) {
+        if self.is_favorited != favorited {
+            self.is_favorited = favorited;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn set_playlist_visible(&mut self, visible: bool) {
+        if self.playlist_visible != visible {
+            self.playlist_visible = visible;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn set_playlist_selected(&mut self, selected: usize) {
+        if self.playlist_selected != selected {
+            self.playlist_selected = selected;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn set_playlist_count(&mut self, count: usize) {
+        if self.playlist_count != count {
+            self.playlist_count = count;
+            self.render_dirty = true;
+        }
+    }
 }
 
 /// Immutable assets loaded at startup.
@@ -101,6 +156,10 @@ pub struct Assets {
     pub cover_mask: Option<RgbaImage>,
     pub playing: Option<RgbaImage>,
     pub paused: Option<RgbaImage>,
+    pub spotify_on: Option<RgbaImage>,
+    pub spotify_off: Option<RgbaImage>,
+    pub fav_on: Option<RgbaImage>,
+    pub fav_off: Option<RgbaImage>,
 }
 
 impl Assets {
@@ -115,8 +174,14 @@ impl Assets {
                 .expect("required resource: taperoll.png"),
             wheel: load_image_resource("wheel.png").expect("required resource: wheel.png"),
             cover_mask: load_image_resource("cover_mask.png"),
-            playing: load_image_resource("playing.png"),
-            paused: load_image_resource("paused.png"),
+            playing: load_image_resource("play.png")
+                .or_else(|| load_image_resource("playing.png")),
+            paused: load_image_resource("pause.png")
+                .or_else(|| load_image_resource("paused.png")),
+            spotify_on: load_image_resource("spotify_on.png"),
+            spotify_off: load_image_resource("spotify_off.png"),
+            fav_on: load_image_resource("fav_on.png"),
+            fav_off: load_image_resource("fav_off.png"),
         }
     }
 }

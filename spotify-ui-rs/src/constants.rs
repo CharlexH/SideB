@@ -46,15 +46,15 @@ pub const RIGHT_WHEEL_X: i32 = 656;
 pub const RIGHT_WHEEL_Y: i32 = 232;
 
 // Status display
-pub const STATUS_DOT_X: i32 = 28;
-pub const STATUS_DOT_Y: i32 = 636;
-pub const STATUS_TEXT_X: i32 = 68;
 pub const STATUS_BASELINE_Y: i32 = 677;
-pub const STATUS_LAMP_X: i32 = 11;
-pub const STATUS_LAMP_Y: i32 = 637;
-pub const SOUNDWAVE_X: i32 = 372;
-pub const SOUNDWAVE_Y: i32 = 656;
 pub const HINTS_BASELINE_Y: i32 = 736;
+
+// Bottom bar icons (all 32x32)
+pub const BAR_ICON_SIZE: i32 = 32;
+pub const BAR_ICON_Y: i32 = 651;
+pub const SPOTIFY_ICON_X: i32 = 20;
+pub const FAV_ICON_X: i32 = 68;
+pub const PLAY_ICON_MARGIN: i32 = 8;
 
 // API
 pub const API_BASE: &str = "http://127.0.0.1:3678";
@@ -64,6 +64,8 @@ pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
 pub const BTN_A: u16 = 305;
 pub const BTN_B: u16 = 304;
+pub const BTN_X: u16 = 308;
+pub const BTN_Y: u16 = 307;
 pub const ABS_HAT0X: u16 = 0x10;
 pub const ABS_HAT0Y: u16 = 0x11;
 pub const BTN_START: u16 = 315;
@@ -71,3 +73,22 @@ pub const KEY_MENU: u16 = 139;
 
 // Debounce
 pub const DEBOUNCE_MS: u128 = 500;
+
+
+// Playlist overlay
+pub const PLAYLIST_MARGIN: i32 = 48;
+pub const PLAYLIST_X: i32 = PLAYLIST_MARGIN;
+pub const PLAYLIST_Y: i32 = PLAYLIST_MARGIN;
+pub const PLAYLIST_W: i32 = SCREEN_W as i32 - 2 * PLAYLIST_MARGIN;
+pub const PLAYLIST_H: i32 = SCREEN_H as i32 - 2 * PLAYLIST_MARGIN;
+pub const PLAYLIST_ITEM_HEIGHT: i32 = 48;
+pub const PLAYLIST_HEADER_HEIGHT: i32 = 56;
+pub const PLAYLIST_FOOTER_HEIGHT: i32 = 40;
+pub const PLAYLIST_VISIBLE_ITEMS: usize = 12;
+
+// Data paths
+pub const DATA_DIR: &str = "/mnt/SDCARD/Apps/SpotifyConnect/data";
+pub const MUSIC_DIR: &str = "/mnt/SDCARD/Apps/SpotifyConnect/data/music";
+pub const FAVORITES_PATH: &str = "/mnt/SDCARD/Apps/SpotifyConnect/data/favorites.json";
+pub const YTDLP_BIN: &str = "/tmp/yt-dlp";
+pub const FFMPEG_FULL_BIN: &str = "/tmp/ffmpeg-full";

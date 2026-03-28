@@ -203,6 +203,61 @@ pub fn draw_soundwave(buf: &mut [u8], x: i32, y: i32, bars: &[f64; 24], active: 
     }
 }
 
+/// Test if a point (px, py) is inside a heart shape centered at (0,0) with given size.
+/// Uses the implicit heart curve: (x^2 + y^2 - 1)^3 - x^2 * y^3 <= 0
+/// Coordinates are normalized so the heart fits in a `size x size` box.
+#[inline]
+fn heart_contains(px: f64, py: f64) -> bool {
+    let x2 = px * px;
+    let y2 = py * py;
+    let t = x2 + y2 - 1.0;
+    t * t * t - x2 * y2 * py <= 0.0
+}
+
+/// Draw a filled heart at (x, y) with given size.
+pub fn draw_heart_filled(buf: &mut [u8], x: i32, y: i32, size: i32, r: u8, g: u8, b: u8, a: u8) {
+    let half = size as f64 / 2.0;
+    for dy in 0..size {
+        for dx in 0..size {
+            // Map pixel to normalized heart coordinate space [-1.3, 1.3]
+            let nx = (dx as f64 - half) / half * 1.3;
+            let ny = -(dy as f64 - half) / half * 1.3 + 0.2; // offset to center vertically
+            if heart_contains(nx, ny) {
+                blend_pixel(buf, x + dx, y + dy, r, g, b, a);
+            }
+        }
+    }
+}
+
+/// Draw an outline heart at (x, y) with given size.
+pub fn draw_heart_outline(
+    buf: &mut [u8],
+    x: i32,
+    y: i32,
+    size: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    let half = size as f64 / 2.0;
+    let thickness = 0.12; // border width in normalized coords
+    for dy in 0..size {
+        for dx in 0..size {
+            let nx = (dx as f64 - half) / half * 1.3;
+            let ny = -(dy as f64 - half) / half * 1.3 + 0.2;
+            let inside = heart_contains(nx, ny);
+            // Check if we're near the border by testing slightly inward
+            let nx_inner = nx * (1.0 - thickness);
+            let ny_inner = ny * (1.0 - thickness);
+            let deep_inside = heart_contains(nx_inner, ny_inner);
+            if inside && !deep_inside {
+                blend_pixel(buf, x + dx, y + dy, r, g, b, a);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
