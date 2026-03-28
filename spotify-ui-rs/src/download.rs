@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -5,6 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::constants::{FFMPEG_FULL_BIN, MUSIC_DIR, YTDLP_BIN};
 use crate::favorites::FavoritesManager;
+
+const MAX_RETRIES: u32 = 1;
+const RETRY_DELAY_SECS: u64 = 3;
 
 /// A request to download a track in the background.
 #[derive(Debug)]
@@ -18,25 +22,36 @@ pub struct DownloadRequest {
 /// Manages a queue of background downloads via yt-dlp.
 pub struct DownloadManager {
     tx: mpsc::Sender<DownloadRequest>,
+    pending_uris: Arc<Mutex<HashSet<String>>>,
 }
 
 impl DownloadManager {
     /// Create a new manager and spawn the background download thread.
     pub fn new(favorites: Arc<Mutex<FavoritesManager>>) -> Self {
         let (tx, rx) = mpsc::channel::<DownloadRequest>();
+        let pending_uris = Arc::new(Mutex::new(HashSet::new()));
+        let pending_clone = Arc::clone(&pending_uris);
 
         std::thread::Builder::new()
             .name("download".into())
             .spawn(move || {
-                download_loop(rx, favorites);
+                download_loop(rx, favorites, pending_clone);
             })
             .expect("spawn download thread");
 
-        Self { tx }
+        Self { tx, pending_uris }
     }
 
-    /// Queue a download request. Non-blocking.
+    /// Queue a download request. Deduplicates by URI. Non-blocking.
     pub fn enqueue(&self, request: DownloadRequest) {
+        let mut pending = self.pending_uris.lock().unwrap();
+        if pending.contains(&request.uri) {
+            eprintln!("download: already queued, skipping: {}", request.uri);
+            return;
+        }
+        pending.insert(request.uri.clone());
+        drop(pending);
+
         if let Err(e) = self.tx.send(request) {
             eprintln!("download: enqueue failed: {e}");
         }
@@ -56,7 +71,11 @@ fn sanitize_filename(s: &str) -> String {
 }
 
 /// Background loop that processes download requests one at a time.
-fn download_loop(rx: mpsc::Receiver<DownloadRequest>, favorites: Arc<Mutex<FavoritesManager>>) {
+fn download_loop(
+    rx: mpsc::Receiver<DownloadRequest>,
+    favorites: Arc<Mutex<FavoritesManager>>,
+    pending_uris: Arc<Mutex<HashSet<String>>>,
+) {
     for req in rx.iter() {
         eprintln!(
             "download: starting {} - {}",
@@ -68,6 +87,13 @@ fn download_loop(rx: mpsc::Receiver<DownloadRequest>, favorites: Arc<Mutex<Favor
             let fav = favorites.lock().unwrap();
             if !fav.is_favorited(&req.uri) {
                 eprintln!("download: skipping (unfavorited): {}", req.uri);
+                pending_uris.lock().unwrap().remove(&req.uri);
+                continue;
+            }
+            // Skip if already downloaded
+            if fav.find_by_uri(&req.uri).map_or(false, |e| e.downloaded) {
+                eprintln!("download: skipping (already downloaded): {}", req.uri);
+                pending_uris.lock().unwrap().remove(&req.uri);
                 continue;
             }
         }
@@ -81,61 +107,103 @@ fn download_loop(rx: mpsc::Receiver<DownloadRequest>, favorites: Arc<Mutex<Favor
         let output_path = PathBuf::from(MUSIC_DIR).join(format!("{}.mp3", base_name));
         let cover_path = PathBuf::from(MUSIC_DIR).join(format!("{}.jpg", base_name));
 
-        // Download via yt-dlp
-        let search_query = format!("{} - {}", req.artist_name, req.track_name);
-        let output_template = output_path.to_string_lossy().to_string();
-
-        let result = Command::new(YTDLP_BIN)
-            .args([
-                "-x",
-                "--audio-format",
-                "mp3",
-                "--audio-quality",
-                "5", // reasonable quality, smaller file
-                "--no-playlist",
-                "--no-overwrites",
-                "--ffmpeg-location",
-                FFMPEG_FULL_BIN,
-                "-o",
-                &output_template,
-                &format!("ytsearch1:{}", search_query),
-            ])
-            .output();
-
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    eprintln!("download: success: {}", output_path.display());
-
-                    // Get duration via ffprobe
-                    let duration_ms = probe_duration(&output_path);
-
-                    // Update favorites
-                    let mut fav = favorites.lock().unwrap();
-                    fav.mark_downloaded(
-                        &req.uri,
-                        &output_path.to_string_lossy(),
-                        duration_ms,
-                    );
-
-                    // Try to save cover art (download via curl)
-                    download_cover(&req.cover_url, &cover_path);
-                    // If curl failed, try copying from Spotify cover cache
-                    if !cover_path.exists() && !req.cover_url.is_empty() {
-                        try_copy_from_cover_cache(&req.cover_url, &cover_path);
-                    }
-                    if cover_path.exists() {
-                        fav.set_cover_path(&req.uri, &cover_path.to_string_lossy());
-                    }
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("download: yt-dlp failed: {}", stderr.lines().last().unwrap_or(""));
-                }
-            }
-            Err(e) => {
-                eprintln!("download: failed to run yt-dlp: {e}");
+        // Clean up partial file from previous failed attempt
+        if output_path.exists() {
+            let is_downloaded = favorites
+                .lock()
+                .unwrap()
+                .find_by_uri(&req.uri)
+                .map_or(false, |e| e.downloaded);
+            if !is_downloaded {
+                eprintln!("download: removing stale partial file: {}", output_path.display());
+                let _ = std::fs::remove_file(&output_path);
             }
         }
+
+        // Download via yt-dlp with retry
+        let search_query = format!("{} - {}", req.artist_name, req.track_name);
+        let output_template = output_path.to_string_lossy().to_string();
+        let mut success = false;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                eprintln!("download: retry {attempt}/{MAX_RETRIES} for {} - {}", req.artist_name, req.track_name);
+                std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
+
+                // Re-check favorited status before retry
+                if !favorites.lock().unwrap().is_favorited(&req.uri) {
+                    eprintln!("download: skipping retry (unfavorited): {}", req.uri);
+                    break;
+                }
+            }
+
+            let result = Command::new(YTDLP_BIN)
+                .args([
+                    "-x",
+                    "--audio-format",
+                    "mp3",
+                    "--audio-quality",
+                    "5",
+                    "--no-playlist",
+                    "--ffmpeg-location",
+                    FFMPEG_FULL_BIN,
+                    "-o",
+                    &output_template,
+                    &format!("ytsearch1:{}", search_query),
+                ])
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    success = true;
+                    break;
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!(
+                        "download: yt-dlp failed (attempt {}): {}",
+                        attempt + 1,
+                        stderr.lines().last().unwrap_or("")
+                    );
+                    // Clean up partial file before retry
+                    if output_path.exists() {
+                        let _ = std::fs::remove_file(&output_path);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("download: failed to run yt-dlp: {e}");
+                    break; // Binary missing, no point retrying
+                }
+            }
+        }
+
+        if success {
+            eprintln!("download: success: {}", output_path.display());
+
+            let duration_ms = probe_duration(&output_path);
+
+            let mut fav = favorites.lock().unwrap();
+            fav.mark_downloaded(&req.uri, &output_path.to_string_lossy(), duration_ms);
+
+            download_cover(&req.cover_url, &cover_path);
+            if !cover_path.exists() && !req.cover_url.is_empty() {
+                try_copy_from_cover_cache(&req.cover_url, &cover_path);
+            }
+            if cover_path.exists() {
+                fav.set_cover_path(&req.uri, &cover_path.to_string_lossy());
+            }
+        } else {
+            // All attempts failed — clean up any partial file
+            if output_path.exists() {
+                let _ = std::fs::remove_file(&output_path);
+            }
+            eprintln!(
+                "download: giving up on {} - {}",
+                req.artist_name, req.track_name
+            );
+        }
+
+        pending_uris.lock().unwrap().remove(&req.uri);
     }
 }
 

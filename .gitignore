@@ -19,7 +19,7 @@ package/SideB/ffmpeg-full
 package/SideB/resources/font.ttf
 package/SideB/resources/ca-certificates.crt
 
-# Go
+# Build artifacts
 *.exe
 *.exe~
 *.dll
@@ -28,6 +28,5 @@ package/SideB/resources/ca-certificates.crt
 *.test
 *.out
 
-# Local binaries
-spotify-ui/spotify-ui
+# Rust
 spotify-ui-rs/target/

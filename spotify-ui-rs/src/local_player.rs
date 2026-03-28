@@ -58,43 +58,55 @@ impl LocalPlayer {
     }
 
     /// Play the track at the current playlist index.
+    /// On failure (missing file, spawn error), skips forward up to playlist.len() times
+    /// to find a playable track. Stops if none found.
     fn play_current(&mut self) {
         self.stop_subprocess();
+        self.current_entry = None;
 
         if self.playlist.is_empty() {
             return;
         }
 
-        let entry = self.playlist[self.playlist_index].clone();
-        let file_path = match entry.file_path {
-            Some(ref fp) => fp.clone(),
-            None => {
-                eprintln!("local_player: no file_path for {}", entry.name);
-                return;
-            }
-        };
+        let max_skips = self.playlist.len();
+        for skip in 0..max_skips {
+            let idx = (self.playlist_index + skip) % self.playlist.len();
+            let entry = self.playlist[idx].clone();
 
-        if !std::path::Path::new(&file_path).exists() {
-            eprintln!("local_player: file not found: {}", file_path);
-            return;
+            let file_path = match entry.file_path {
+                Some(ref fp) => fp.clone(),
+                None => {
+                    eprintln!("local_player: no file_path for {}, skipping", entry.name);
+                    continue;
+                }
+            };
+
+            if !std::path::Path::new(&file_path).exists() {
+                eprintln!("local_player: file not found: {}, skipping", file_path);
+                continue;
+            }
+
+            eprintln!("local_player: playing {} - {}", entry.artist, entry.name);
+
+            match spawn_pipeline(&file_path) {
+                Ok((ffmpeg, aplay)) => {
+                    self.ffmpeg_child = Some(ffmpeg);
+                    self.aplay_child = Some(aplay);
+                    self.current_entry = Some(entry);
+                    self.playlist_index = idx;
+                    self.start_time = Instant::now();
+                    self.paused = false;
+                    self.paused_elapsed = Duration::ZERO;
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("local_player: spawn error for {}: {e}", entry.name);
+                    continue;
+                }
+            }
         }
 
-        eprintln!("local_player: playing {} - {}", entry.artist, entry.name);
-
-        // Spawn ffmpeg → aplay pipeline
-        match spawn_pipeline(&file_path) {
-            Ok((ffmpeg, aplay)) => {
-                self.ffmpeg_child = Some(ffmpeg);
-                self.aplay_child = Some(aplay);
-                self.current_entry = Some(entry);
-                self.start_time = Instant::now();
-                self.paused = false;
-                self.paused_elapsed = Duration::ZERO;
-            }
-            Err(e) => {
-                eprintln!("local_player: spawn error: {e}");
-            }
-        }
+        eprintln!("local_player: no playable track found in playlist");
     }
 
     /// Play a specific entry (for playlist selection).
@@ -145,6 +157,34 @@ impl LocalPlayer {
         self.playlist.clear();
         self.playlist_index = 0;
         eprintln!("local_player: stopped");
+    }
+
+    /// Refresh the playlist with newly downloaded entries while preserving current position.
+    /// New tracks are appended; removed tracks are pruned.
+    pub fn refresh_playlist(&mut self, entries: Vec<FavoriteEntry>) {
+        if self.playlist.is_empty() {
+            // No active playlist — just replace
+            self.playlist = entries;
+            return;
+        }
+
+        let current_uri = self.playlist.get(self.playlist_index).map(|e| e.uri.clone());
+
+        // Add new entries that aren't already in the playlist
+        let existing_uris: std::collections::HashSet<String> =
+            self.playlist.iter().map(|e| e.uri.clone()).collect();
+        for entry in entries {
+            if !existing_uris.contains(&entry.uri) {
+                self.playlist.push(entry);
+            }
+        }
+
+        // Restore index to current track
+        if let Some(uri) = current_uri {
+            if let Some(idx) = self.playlist.iter().position(|e| e.uri == uri) {
+                self.playlist_index = idx;
+            }
+        }
     }
 
     pub fn next(&mut self) {

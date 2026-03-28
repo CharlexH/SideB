@@ -575,7 +575,7 @@ pub fn render_loop(
             let mut st = app_state.lock().unwrap();
             mode = st.mode;
             paused = st.paused;
-            dirty = st.render_dirty;
+            dirty = st.render_dirty || st.exit_confirm_until.is_some();
             playlist_visible = st.playlist_visible;
 
             // Animate wheels when playing (Spotify or Local)
@@ -639,6 +639,29 @@ pub fn render_loop(
             if rs.full_redraw || dirty {
                 back_buf.copy_from_slice(&rs.scene_waiting);
 
+                // Exit confirmation overlay on waiting screen
+                {
+                    let mut st = app_state.lock().unwrap();
+                    let exit_active = match st.exit_confirm_until {
+                        Some(until) if std::time::Instant::now() < until => true,
+                        Some(_) => {
+                            st.exit_confirm_until = None;
+                            st.render_dirty = true;
+                            false
+                        }
+                        None => false,
+                    };
+                    if exit_active {
+                        let msg = "Press B again to exit";
+                        let msg_w = fonts.measure_text(msg, fonts.scale_large);
+                        let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
+                        fonts.draw_text(
+                            back_buf, msg, msg_x, STATUS_BASELINE_Y,
+                            200, 200, 200, fonts.scale_large,
+                        );
+                    }
+                }
+
                 // Playlist overlay on waiting screen
                 if playlist_visible {
                     render_playlist(back_buf, &app_state, &favorites, fonts);
@@ -658,67 +681,94 @@ pub fn render_loop(
 
             // Draw bottom bar overlay (icons + track info + time)
             {
-                let st = app_state.lock().unwrap();
+                let mut st = app_state.lock().unwrap();
                 let rs = render_state.lock().unwrap();
 
-                // Left side: Spotify connection icon
-                let spotify_icon = if st.connected {
-                    &rs.img_spotify_on
-                } else {
-                    &rs.img_spotify_off
-                };
-                if let Some(img) = spotify_icon {
-                    drawing::draw_image_alpha(back_buf, img, SPOTIFY_ICON_X, BAR_ICON_Y);
-                }
-
-                // Left side: favorite icon
-                if !st.current_track_uri.is_empty() {
-                    let fav_icon = if st.is_favorited {
-                        &rs.img_fav_on
-                    } else {
-                        &rs.img_fav_off
-                    };
-                    if let Some(img) = fav_icon {
-                        drawing::draw_image_alpha(back_buf, img, FAV_ICON_X, BAR_ICON_Y);
+                // Check if exit confirmation is active
+                let exit_active = match st.exit_confirm_until {
+                    Some(until) if std::time::Instant::now() < until => true,
+                    Some(_) => {
+                        // Expired — clear it and mark dirty so bar redraws normally
+                        st.exit_confirm_until = None;
+                        st.render_dirty = true;
+                        false
                     }
-                }
-
-                // Right side: time remaining
-                let time_remaining = animation::format_duration(st.duration - st.position);
-                let tr_w = fonts.measure_text(&time_remaining, fonts.scale_large);
-                let time_x = SCREEN_W as i32 - 28 - tr_w;
-                fonts.draw_text(
-                    back_buf,
-                    &time_remaining,
-                    time_x,
-                    STATUS_BASELINE_Y,
-                    255, 255, 255,
-                    fonts.scale_large,
-                );
-
-                // Right side: play/pause icon (left of time)
-                let play_icon = if st.paused {
-                    &rs.img_paused
-                } else {
-                    &rs.img_playing
+                    None => false,
                 };
-                if let Some(img) = play_icon {
-                    let icon_x = time_x - PLAY_ICON_MARGIN - BAR_ICON_SIZE;
-                    drawing::draw_image_alpha(back_buf, img, icon_x, BAR_ICON_Y);
-                }
 
-                // Center: track info
-                if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30) {
-                    let info_w = fonts.measure_text(&info_text, fonts.scale_large);
-                    let info_x = centered_text_x(SCREEN_W as i32, info_w);
+                if exit_active {
+                    // Show centered exit confirmation message
+                    let msg = "Press B again to exit";
+                    let msg_w = fonts.measure_text(msg, fonts.scale_large);
+                    let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
                     fonts.draw_text(
                         back_buf,
-                        &info_text,
-                        info_x,
+                        msg,
+                        msg_x,
+                        STATUS_BASELINE_Y,
+                        200, 200, 200,
+                        fonts.scale_large,
+                    );
+                } else {
+                    // Left side: Spotify connection icon
+                    let spotify_icon = if st.connected {
+                        &rs.img_spotify_on
+                    } else {
+                        &rs.img_spotify_off
+                    };
+                    if let Some(img) = spotify_icon {
+                        drawing::draw_image_alpha(back_buf, img, SPOTIFY_ICON_X, BAR_ICON_Y);
+                    }
+
+                    // Left side: favorite icon
+                    if !st.current_track_uri.is_empty() {
+                        let fav_icon = if st.is_favorited {
+                            &rs.img_fav_on
+                        } else {
+                            &rs.img_fav_off
+                        };
+                        if let Some(img) = fav_icon {
+                            drawing::draw_image_alpha(back_buf, img, FAV_ICON_X, BAR_ICON_Y);
+                        }
+                    }
+
+                    // Right side: time remaining
+                    let time_remaining = animation::format_duration(st.duration - st.position);
+                    let tr_w = fonts.measure_text(&time_remaining, fonts.scale_large);
+                    let time_x = SCREEN_W as i32 - 28 - tr_w;
+                    fonts.draw_text(
+                        back_buf,
+                        &time_remaining,
+                        time_x,
                         STATUS_BASELINE_Y,
                         255, 255, 255,
                         fonts.scale_large,
                     );
+
+                    // Right side: play/pause icon (left of time)
+                    let play_icon = if st.paused {
+                        &rs.img_paused
+                    } else {
+                        &rs.img_playing
+                    };
+                    if let Some(img) = play_icon {
+                        let icon_x = time_x - PLAY_ICON_MARGIN - BAR_ICON_SIZE;
+                        drawing::draw_image_alpha(back_buf, img, icon_x, BAR_ICON_Y);
+                    }
+
+                    // Center: track info
+                    if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30) {
+                        let info_w = fonts.measure_text(&info_text, fonts.scale_large);
+                        let info_x = centered_text_x(SCREEN_W as i32, info_w);
+                        fonts.draw_text(
+                            back_buf,
+                            &info_text,
+                            info_x,
+                            STATUS_BASELINE_Y,
+                            255, 255, 255,
+                            fonts.scale_large,
+                        );
+                    }
                 }
             }
 

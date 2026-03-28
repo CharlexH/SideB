@@ -84,6 +84,9 @@ fn main() {
     let favorites = Arc::new(Mutex::new(FavoritesManager::load(FAVORITES_PATH)));
     let local_player = Arc::new(Mutex::new(LocalPlayer::new()));
 
+    // Clean up orphaned files in music directory
+    cleanup_orphaned_files(&favorites);
+
     // Create command channel
     let (cmd_tx, cmd_rx) = mpsc::channel::<InputAction>();
 
@@ -272,6 +275,24 @@ fn command_processor(
         }
 
         match action {
+            InputAction::RequestExit => {
+                let mut st = app_state.lock().unwrap();
+                let now = Instant::now();
+                if let Some(until) = st.exit_confirm_until {
+                    if now < until {
+                        // Second press within window — actually exit
+                        eprintln!("exit confirmed via B (double press)");
+                        drop(st);
+                        quit.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+                // First press — show confirmation, start 2s window
+                eprintln!("exit: press B again within 2s to confirm");
+                st.exit_confirm_until = Some(now + Duration::from_secs(2));
+                st.render_dirty = true;
+            }
+
             InputAction::ExitApp => {
                 quit.store(true, Ordering::Relaxed);
                 return;
@@ -381,7 +402,9 @@ fn command_processor(
             }
 
             InputAction::NextTrack => {
+                let downloaded = favorites.lock().unwrap().downloaded_entries();
                 let mut player = local_player.lock().unwrap();
+                player.refresh_playlist(downloaded);
                 player.next();
                 sync_local_track_to_app(&player, &app_state, &favorites);
                 let entry = player.current_entry().cloned();
@@ -392,7 +415,9 @@ fn command_processor(
             }
 
             InputAction::PrevTrack => {
+                let downloaded = favorites.lock().unwrap().downloaded_entries();
                 let mut player = local_player.lock().unwrap();
+                player.refresh_playlist(downloaded);
                 player.prev();
                 sync_local_track_to_app(&player, &app_state, &favorites);
                 let entry = player.current_entry().cloned();
@@ -594,6 +619,42 @@ fn command_processor(
                 }
             }
         }
+    }
+}
+
+/// Remove orphaned files from the music directory that are not referenced by any favorite.
+fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
+    let fav = favorites.lock().unwrap();
+    let referenced = fav.referenced_files();
+    drop(fav);
+
+    let entries = match std::fs::read_dir(MUSIC_DIR) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let path_str = path.to_string_lossy().to_string();
+
+        // Only clean up .mp3 and .jpg files
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("mp3") | Some("jpg") => {}
+            _ => continue,
+        }
+
+        if !referenced.contains(&path_str) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("cleanup: failed to remove {}: {e}", path.display());
+            } else {
+                removed += 1;
+            }
+        }
+    }
+
+    if removed > 0 {
+        eprintln!("cleanup: removed {removed} orphaned file(s) from {MUSIC_DIR}");
     }
 }
 

@@ -160,7 +160,7 @@ fn handle_normal_input(
     mode: AppMode,
     state: &Arc<Mutex<AppState>>,
     cmd_tx: &Sender<InputAction>,
-    quit: &Arc<AtomicBool>,
+    _quit: &Arc<AtomicBool>,
 ) {
     if ev.event_type == EV_KEY {
         match ev.code {
@@ -200,9 +200,7 @@ fn handle_normal_input(
             }
 
             BTN_B => {
-                eprintln!("exit requested via B");
-                let _ = cmd_tx.send(InputAction::ExitApp);
-                quit.store(true, Ordering::Relaxed);
+                let _ = cmd_tx.send(InputAction::RequestExit);
             },
 
             BTN_X => {

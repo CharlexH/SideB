@@ -72,13 +72,6 @@ cargo build --release --target aarch64-unknown-linux-musl
 cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB/sideb
 ```
 
-### Legacy Go UI (reference only)
-
-```bash
-cd SideB/spotify-ui
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../package/SideB/sideb .
-```
-
 ### Required runtime files (not tracked in git)
 
 - `package/SideB/go-librespot` — Spotify Connect backend binary
@@ -100,18 +93,11 @@ Launch **SideB** from the TrimUI app menu, then select **TrimUI Brick** from Spo
 ## Repo Layout
 
 ```text
-spotify-ui-rs/                  Rust UI source (current shipping implementation)
-spotify-ui/                     Legacy Go UI source (reference only)
+spotify-ui-rs/                  Rust UI source
 package/SideB/                  Deployable app folder for the SD card
 package/SideB/data/             Runtime config and persisted state (favorites, music)
 package/SideB/resources/        UI images, icons, and fonts
-docs/                           Architecture and operations documentation
 ```
-
-## Documentation
-
-- [`docs/architecture.md`](docs/architecture.md) — runtime architecture, thread model, mode state machine
-- [`docs/operations.md`](docs/operations.md) — build, deploy, device logs, troubleshooting, known issues
 
 ## Configuration
 

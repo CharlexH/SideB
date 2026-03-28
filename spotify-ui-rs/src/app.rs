@@ -33,6 +33,9 @@ pub struct AppState {
     pub playlist_visible: bool,
     pub playlist_selected: usize,
     pub playlist_count: usize,
+
+    // -- Exit confirmation --
+    pub exit_confirm_until: Option<Instant>,
 }
 
 impl AppState {
@@ -67,6 +70,8 @@ impl AppState {
             playlist_visible: false,
             playlist_selected: 0,
             playlist_count: 0,
+
+            exit_confirm_until: None,
         }
     }
 

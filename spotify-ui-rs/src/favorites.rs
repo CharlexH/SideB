@@ -161,4 +161,18 @@ impl FavoritesManager {
     pub fn downloaded_count(&self) -> usize {
         self.entries.iter().filter(|e| e.downloaded).count()
     }
+
+    /// Return all file paths referenced by favorites (MP3 + cover).
+    pub fn referenced_files(&self) -> std::collections::HashSet<String> {
+        let mut files = std::collections::HashSet::new();
+        for entry in &self.entries {
+            if let Some(ref fp) = entry.file_path {
+                files.insert(fp.clone());
+            }
+            if let Some(ref cp) = entry.cover_path {
+                files.insert(cp.clone());
+            }
+        }
+        files
+    }
 }
