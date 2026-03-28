@@ -10,13 +10,17 @@ echo 1 > /tmp/stay_alive
 
 # Kill any existing instances
 killall go-librespot 2>/dev/null
-killall spotify-ui 2>/dev/null
+killall sideb 2>/dev/null
 sleep 1
 
 # Copy binaries to /tmp (SD card is vfat, can't exec directly)
 cp "$progdir/go-librespot" /tmp/go-librespot
-cp "$progdir/spotify-ui" /tmp/spotify-ui
-chmod +x /tmp/go-librespot /tmp/spotify-ui
+cp "$progdir/sideb" /tmp/sideb
+chmod +x /tmp/go-librespot /tmp/sideb
+
+# Copy yt-dlp and ffmpeg-full if present
+[ -f "$progdir/yt-dlp" ] && cp "$progdir/yt-dlp" /tmp/yt-dlp && chmod +x /tmp/yt-dlp
+[ -f "$progdir/ffmpeg-full" ] && cp "$progdir/ffmpeg-full" /tmp/ffmpeg-full && chmod +x /tmp/ffmpeg-full
 
 # Start go-librespot backend
 mkdir -p "$progdir/data"
@@ -32,7 +36,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 # Start UI
-/tmp/spotify-ui 2>/tmp/spotify-ui.log
+/tmp/sideb 2>/tmp/sideb.log
 
 # Cleanup
 kill $BACKEND_PID 2>/dev/null

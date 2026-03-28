@@ -1,0 +1,9 @@
+{
+  "label": "SideB",
+  "label.ch.lang": "SideB",
+  "icon": "",
+  "icontop": "ic-sideb.png",
+  "launch": "launch.sh",
+  "description": "Spotify Connect Receiver & Offline Player",
+  "description.ch.lang": "Spotify 串流 & 离线播放器"
+}

@@ -398,7 +398,7 @@ impl RenderState {
         }
 
         // Draw "Waiting..." message
-        let msg = "Waiting for Spotify Connect...";
+        let msg = "Waiting for Spotify...";
         let exit_hint = "EXIT [B]";
 
         // Clear hints area and draw centered text

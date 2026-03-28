@@ -19,9 +19,9 @@ pub fn resource_candidates(name: &str) -> Vec<PathBuf> {
     };
 
     add(Path::new("resources").join(name));
-    add(Path::new("package/SpotifyConnect/resources").join(name));
-    add(Path::new("../package/SpotifyConnect/resources").join(name));
-    add(Path::new("/mnt/SDCARD/Apps/SpotifyConnect/resources").join(name));
+    add(Path::new("package/SideB/resources").join(name));
+    add(Path::new("../package/SideB/resources").join(name));
+    add(Path::new("/mnt/SDCARD/Apps/SideB/resources").join(name));
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

@@ -1,4 +1,4 @@
-# TrimUI Spotify Connect
+# SideB
 
 Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with a native fullscreen cassette-tape UI.
 
@@ -39,7 +39,7 @@ This project provides an offline caching mechanism strictly for **personal, non-
 - **No content is hosted or distributed by this project.** All audio files are cached locally on the user's own device and are never uploaded, shared, or made available to third parties.
 - **The project does not circumvent any DRM or copy protection.** Spotify audio streams are not intercepted or recorded. Offline caching relies on publicly available content retrieved via [yt-dlp](https://github.com/yt-dlp/yt-dlp) from YouTube.
 - **Users are solely responsible for ensuring their use complies with applicable copyright laws and the terms of service of any third-party platform** (including YouTube and Spotify). The authors and contributors of this project assume no liability for how the software is used.
-- **If you are a rights holder** and believe this project facilitates infringement of your rights, please [open an issue](https://github.com/CharlexH/trimui-spotify/issues) and we will address it promptly.
+- **If you are a rights holder** and believe this project facilitates infringement of your rights, please [open an issue](https://github.com/CharlexH/SideB/issues) and we will address it promptly.
 
 This software is provided as-is for educational and personal use. It is not intended to promote or facilitate unauthorized copying or distribution of copyrighted material.
 
@@ -66,45 +66,45 @@ This software is provided as-is for educational and personal use. It is not inte
 ### Rust UI (current)
 
 ```bash
-git clone https://github.com/CharlexH/trimui-spotify.git
-cd trimui-spotify/spotify-ui-rs
+git clone https://github.com/CharlexH/SideB.git
+cd SideB/spotify-ui-rs
 cargo build --release --target aarch64-unknown-linux-musl
-cp target/aarch64-unknown-linux-musl/release/spotify-ui ../package/SpotifyConnect/spotify-ui
+cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB/sideb
 ```
 
 ### Legacy Go UI (reference only)
 
 ```bash
-cd trimui-spotify/spotify-ui
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../package/SpotifyConnect/spotify-ui .
+cd SideB/spotify-ui
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../package/SideB/sideb .
 ```
 
 ### Required runtime files (not tracked in git)
 
-- `package/SpotifyConnect/go-librespot` — Spotify Connect backend binary
-- `package/SpotifyConnect/ffmpeg-full` — static ffmpeg with MP3 encoder support
-- `package/SpotifyConnect/yt-dlp` — YouTube audio downloader (aarch64 binary)
-- `package/SpotifyConnect/resources/ca-certificates.crt` — TLS root certificates
-- `package/SpotifyConnect/resources/font.ttf` — UI font
+- `package/SideB/go-librespot` — Spotify Connect backend binary
+- `package/SideB/ffmpeg-full` — static ffmpeg with MP3 encoder support
+- `package/SideB/yt-dlp` — YouTube audio downloader (aarch64 binary)
+- `package/SideB/resources/ca-certificates.crt` — TLS root certificates
+- `package/SideB/resources/font.ttf` — UI font
 
 ## Deploy
 
-Copy `package/SpotifyConnect` to the SD card:
+Copy `package/SideB` to the SD card:
 
 ```text
-/mnt/SDCARD/Apps/SpotifyConnect/
+/mnt/SDCARD/Apps/SideB/
 ```
 
-Launch **Spotify** from the TrimUI app menu, then select **TrimUI Brick** from Spotify Connect on another device.
+Launch **SideB** from the TrimUI app menu, then select **TrimUI Brick** from Spotify Connect on another device.
 
 ## Repo Layout
 
 ```text
 spotify-ui-rs/                  Rust UI source (current shipping implementation)
 spotify-ui/                     Legacy Go UI source (reference only)
-package/SpotifyConnect/         Deployable app folder for the SD card
-package/SpotifyConnect/data/    Runtime config and persisted state (favorites, music)
-package/SpotifyConnect/resources/ UI images, icons, and fonts
+package/SideB/                  Deployable app folder for the SD card
+package/SideB/data/             Runtime config and persisted state (favorites, music)
+package/SideB/resources/        UI images, icons, and fonts
 docs/                           Architecture and operations documentation
 ```
 
@@ -115,7 +115,7 @@ docs/                           Architecture and operations documentation
 
 ## Configuration
 
-Main config: [`package/SpotifyConnect/data/config.yml`](package/SpotifyConnect/data/config.yml)
+Main config: [`package/SideB/data/config.yml`](package/SideB/data/config.yml)
 
 ```yaml
 device_name: "TrimUI Brick"

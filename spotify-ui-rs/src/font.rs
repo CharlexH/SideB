@@ -112,7 +112,7 @@ mod tests {
     
     #[test]
     fn test_font_metrics() {
-        let data = std::fs::read("/Users/charlex/Projects/trimui-spotify/package/SpotifyConnect/resources/font_mono.ttf").unwrap();
+        let data = std::fs::read("/Users/charlex/Projects/trimui-spotify/package/SideB/resources/font_mono.ttf").unwrap();
         let font = FontVec::try_from_vec(data).unwrap();
         let upem = font.units_per_em().unwrap();
         let ascent = font.ascent_unscaled();

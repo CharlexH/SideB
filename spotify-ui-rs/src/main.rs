@@ -34,7 +34,7 @@ use mode::{AppMode, InputAction};
 use render::RenderState;
 
 fn main() {
-    eprintln!("spotify-ui (rust) starting");
+    eprintln!("sideb starting");
 
     // Initialize framebuffer
     let fb = Framebuffer::open().unwrap_or_else(|e| {

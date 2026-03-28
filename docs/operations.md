@@ -19,24 +19,23 @@ Typical Rust release build:
 ```bash
 cd spotify-ui-rs
 cargo build --release --target aarch64-unknown-linux-musl
-cp target/aarch64-unknown-linux-musl/release/spotify-ui ../package/SpotifyConnect/spotify-ui
+cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB/sideb
 ```
 
 ## Device paths
 
 Important runtime paths on the TrimUI device:
 
-- app folder: `/mnt/SDCARD/Apps/SpotifyConnect`
-- runtime UI binary: `/tmp/spotify-ui`
+- app folder: `/mnt/SDCARD/Apps/SideB`
+- runtime UI binary: `/tmp/sideb`
 - runtime backend binary: `/tmp/go-librespot`
 - runtime yt-dlp binary: `/tmp/yt-dlp`
 - runtime static ffmpeg: `/tmp/ffmpeg-full`
-- UI log: `/tmp/spotify-ui.log`
+- UI log: `/tmp/sideb.log`
 - backend log: `/tmp/go-librespot.log`
-- launcher log: `/tmp/spotify-launch.log`
-- cover cache: `/tmp/spotify-ui-cover-cache`
-- favorites database: `/mnt/SDCARD/Apps/SpotifyConnect/data/favorites.json`
-- downloaded music: `/mnt/SDCARD/Apps/SpotifyConnect/data/music/`
+- cover cache: `/tmp/sideb-cover-cache`
+- favorites database: `/mnt/SDCARD/Apps/SideB/data/favorites.json`
+- downloaded music: `/mnt/SDCARD/Apps/SideB/data/music/`
 
 ## Launch and restart behavior
 
@@ -45,7 +44,7 @@ Important runtime paths on the TrimUI device:
 Startup sequence:
 
 1. stale processes are killed
-2. binaries are copied to `/tmp` (`go-librespot`, `spotify-ui`, `yt-dlp`, `ffmpeg-full`)
+2. binaries are copied to `/tmp` (`go-librespot`, `sideb`, `yt-dlp`, `ffmpeg-full`)
 3. backend starts
 4. local API is probed
 5. UI starts
@@ -61,10 +60,10 @@ Common files replaced during iteration:
 - `cover_mask.png`
 - `taperoll.png`
 - `wheel.png`
-- `playing.png`
-- `paused.png`
+- `play.png`
+- `pause.png`
 - `font_mono.ttf`
-- `ic-spotify.png`
+- `ic-sideb.png`
 
 Notes:
 
@@ -77,7 +76,7 @@ Notes:
 UI and playback issues should start with:
 
 ```bash
-tail -n 200 /tmp/spotify-ui.log
+tail -n 200 /tmp/sideb.log
 tail -n 200 /tmp/go-librespot.log
 curl -s http://127.0.0.1:3678/status
 ```
@@ -85,8 +84,8 @@ curl -s http://127.0.0.1:3678/status
 If the app is running, also check:
 
 ```bash
-ps | grep -E 'spotify-ui|go-librespot'
-ls -l /tmp/spotify-ui-cover-cache
+ps | grep -E 'sideb|go-librespot'
+ls -l /tmp/sideb-cover-cache
 ```
 
 ## Cover switching notes
@@ -102,7 +101,7 @@ Current expected behavior:
 Relevant current implementation details:
 
 - cover URLs are upgraded to `640x640` Spotify CDN variants
-- covers are cached under `/tmp/spotify-ui-cover-cache`
+- covers are cached under `/tmp/sideb-cover-cache`
 - logs include cover keys and timing markers such as `cache hit`, `fetch done`, `decoded`, `applied from cache`, and `render-state lock waited`
 
 If cover switching feels slow:
@@ -172,7 +171,7 @@ Solution: the metadata handler sends `SpotifyTrackChanged` through the command c
 If `cover_url` is empty in a favorite entry, the download thread has no URL to download cover art, and local playback will show no cover. The fallback chain is:
 
 1. Local `.jpg` file alongside the MP3 (written during download)
-2. Spotify cover cache at `/tmp/spotify-ui-cover-cache/` (matched by FNV hash of URL)
+2. Spotify cover cache at `/tmp/sideb-cover-cache/` (matched by FNV hash of URL)
 3. Fetch from Spotify CDN via `curl`
 
 All three require a non-empty `cover_url` to function.
@@ -183,11 +182,11 @@ The playlist overlay paints over the entire screen. When dismissed, if only dirt
 
 ### Device ffmpeg has no MP3 encoder
 
-The device's built-in ffmpeg (6.1) was compiled with decoders only — no `libmp3lame`. yt-dlp post-processing fails with `"audio conversion failed: Encoder not found"`. A separate static ffmpeg binary with full codec support is shipped at `/mnt/SDCARD/Apps/SpotifyConnect/ffmpeg-full` and passed to yt-dlp via `--ffmpeg-location`.
+The device's built-in ffmpeg (6.1) was compiled with decoders only — no `libmp3lame`. yt-dlp post-processing fails with `"audio conversion failed: Encoder not found"`. A separate static ffmpeg binary with full codec support is shipped at `/mnt/SDCARD/Apps/SideB/ffmpeg-full` and passed to yt-dlp via `--ffmpeg-location`.
 
 ### SD card vfat execution restriction
 
-The SD card is mounted as vfat which cannot execute binaries. All binaries (`spotify-ui`, `go-librespot`, `yt-dlp`, `ffmpeg-full`) must be copied to `/tmp` before execution. The `launch.sh` script handles this.
+The SD card is mounted as vfat which cannot execute binaries. All binaries (`sideb`, `go-librespot`, `yt-dlp`, `ffmpeg-full`) must be copied to `/tmp` before execution. The `launch.sh` script handles this.
 
 ### Spotify events must not mutate UI state during local playback
 
@@ -249,7 +248,7 @@ The bottom bar was redesigned from text-based status to icon-based:
 Old layout: 60x60 playing/paused lamp + "PLAYING"/"PAUSED" text + procedural heart + time
 New layout: spotify_on/off icon + fav_on/off icon + centered track info + play/pause icon + time
 
-New icon assets (all 28x28 PNG RGBA):
+New icon assets (all 32x32 PNG RGBA):
 - `spotify_on.png` / `spotify_off.png` — Spotify connection state (left side)
 - `fav_on.png` / `fav_off.png` — favorite state (left side, only when track loaded)
 - `play.png` / `pause.png` — playback state (right side, left of time)

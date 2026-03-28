@@ -9,17 +9,17 @@ The app is split into two pieces:
 - `go-librespot`: Spotify Connect backend, local playback control, and local HTTP/WebSocket APIs
 - `spotify-ui-rs`: native Rust framebuffer UI that renders the cassette scene, cover art, status line, and input-driven controls
 
-The packaged app in [`package/SpotifyConnect`](../package/SpotifyConnect) launches both pieces. The Go UI in [`spotify-ui`](../spotify-ui) is now a reference implementation and fallback, not the default runtime.
+The packaged app in [`package/SideB`](../package/SideB) launches both pieces. The Go UI in [`spotify-ui`](../spotify-ui) is now a reference implementation and fallback, not the default runtime.
 
 ## Startup flow
 
-Runtime startup is controlled by [`package/SpotifyConnect/launch.sh`](../package/SpotifyConnect/launch.sh).
+Runtime startup is controlled by [`package/SideB/launch.sh`](../package/SideB/launch.sh).
 
-1. Kill stale `go-librespot` and `spotify-ui` processes.
-2. Copy `go-librespot` and `spotify-ui` from the SD card app folder to `/tmp`.
-3. Start `go-librespot` with `package/SpotifyConnect/data/config.yml`.
+1. Kill stale `go-librespot` and `sideb` processes.
+2. Copy `go-librespot` and `sideb` from the SD card app folder to `/tmp`.
+3. Start `go-librespot` with `package/SideB/data/config.yml`.
 4. Poll `http://127.0.0.1:3678/status` until the local API is up.
-5. Start `/tmp/spotify-ui`.
+5. Start `/tmp/sideb`.
 
 The copy-to-`/tmp` step is required because the SD card is mounted as `vfat` and cannot execute binaries in place.
 
@@ -98,7 +98,7 @@ ffmpeg -i file.mp3 -f s16le -ar 44100 -ac 2 pipe:1 | aplay -f S16_LE -r 44100 -c
 
 ## Favorites and download system
 
-Favorites are persisted in `/mnt/SDCARD/Apps/SpotifyConnect/data/favorites.json` with atomic writes (`.tmp` + rename).
+Favorites are persisted in `/mnt/SDCARD/Apps/SideB/data/favorites.json` with atomic writes (`.tmp` + rename).
 
 Downloads use a standalone `yt-dlp` aarch64 binary with a separate static `ffmpeg` that includes `libmp3lame` (the device's built-in ffmpeg only has decoders, no MP3 encoder):
 
@@ -108,7 +108,7 @@ yt-dlp -x --audio-format mp3 --ffmpeg-location /tmp/ffmpeg-full -o "{output}" "y
 
 Cover art for downloads has three sources (checked in order):
 1. `curl` download from Spotify CDN URL
-2. Copy from Spotify cover cache at `/tmp/spotify-ui-cover-cache/` (original JPEG bytes)
+2. Copy from Spotify cover cache at `/tmp/sideb-cover-cache/` (original JPEG bytes)
 3. Fallback to no cover
 
 ## Render pipeline
@@ -138,7 +138,7 @@ Cover handling is centered in [`network.rs`](../spotify-ui-rs/src/network.rs).
 Current behavior:
 
 - Spotify CDN cover URLs are upgraded to the `640x640` variant when possible
-- cached covers live in `/tmp/spotify-ui-cover-cache`
+- cached covers live in `/tmp/sideb-cover-cache`
 - cache hits are decoded and applied synchronously
 - cache misses clear the current cover and fetch in the background
 - stale fetch results are dropped if the requested cover URL changed while the download was in flight
@@ -183,7 +183,7 @@ Current layout (icon-based):
 - center: `歌曲名 - 歌手`
 - right side: play/pause icon (`play`/`pause`) + time remaining
 
-All status bar icons are 28x28 PNG RGBA, drawn at `BAR_ICON_Y` (653px).
+All status bar icons are 32x32 PNG RGBA, drawn at `BAR_ICON_Y` (651px).
 
 The middle text:
 
@@ -209,19 +209,19 @@ Current playback event handling includes:
 
 ## Resource files
 
-The packaged app expects these runtime resources in [`package/SpotifyConnect/resources`](../package/SpotifyConnect/resources):
+The packaged app expects these runtime resources in [`package/SideB/resources`](../package/SideB/resources):
 
 - `tapeBase.png`
 - `tapeA.png`
 - `cover_mask.png`
 - `taperoll.png`
 - `wheel.png`
-- `play.png` (28x28, bottom bar play indicator)
-- `pause.png` (28x28, bottom bar pause indicator)
-- `spotify_on.png` (28x28, Spotify connected indicator)
-- `spotify_off.png` (28x28, Spotify disconnected indicator)
-- `fav_on.png` (28x28, favorited indicator)
-- `fav_off.png` (28x28, not favorited indicator)
+- `play.png` (32x32, bottom bar play indicator)
+- `pause.png` (32x32, bottom bar pause indicator)
+- `spotify_on.png` (32x32, Spotify connected indicator)
+- `spotify_off.png` (32x32, Spotify disconnected indicator)
+- `fav_on.png` (32x32, favorited indicator)
+- `fav_off.png` (32x32, not favorited indicator)
 - `font.ttf`
 - `font_mono.ttf`
 - `ca-certificates.crt`

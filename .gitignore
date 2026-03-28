@@ -10,12 +10,14 @@ go-librespot/
 go-librespot_linux_arm64.tar.gz
 
 # Binaries in package (download separately)
-package/SpotifyConnect/go-librespot
-package/SpotifyConnect/spotify-ui
+package/SideB/go-librespot
+package/SideB/sideb
+package/SideB/yt-dlp
+package/SideB/ffmpeg-full
 
 # Large resource files (see README for download instructions)
-package/SpotifyConnect/resources/font.ttf
-package/SpotifyConnect/resources/ca-certificates.crt
+package/SideB/resources/font.ttf
+package/SideB/resources/ca-certificates.crt
 
 # Go
 *.exe

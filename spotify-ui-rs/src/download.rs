@@ -201,7 +201,7 @@ fn try_copy_from_cover_cache(url: &str, dest: &Path) {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    let cache_path = PathBuf::from("/tmp/spotify-ui-cover-cache").join(format!("{hash:016x}.img"));
+    let cache_path = PathBuf::from("/tmp/sideb-cover-cache").join(format!("{hash:016x}.img"));
 
     if cache_path.exists() {
         match std::fs::copy(&cache_path, dest) {

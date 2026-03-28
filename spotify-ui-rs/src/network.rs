@@ -251,7 +251,7 @@ fn cover_fetch_curl_args<'a>(cert_file: &'a str, url: &'a str) -> Vec<&'a str> {
 }
 
 fn cover_cache_root() -> PathBuf {
-    PathBuf::from("/tmp/spotify-ui-cover-cache")
+    PathBuf::from("/tmp/sideb-cover-cache")
 }
 
 fn cover_cache_key(url: &str) -> String {
