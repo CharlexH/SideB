@@ -23,6 +23,7 @@ This manifest records the bundled third-party binaries that ship with SideB rele
 - Upstream: https://ffmpeg.org
 - License: GPL-2.0-or-later when built with GPL-only components
 - Local package path: `package/SideB.pak/ffmpeg-full`
+- SideB usage: bundled audio transcoder for yt-dlp downloads; local embedded-cover extraction uses the device's system ffmpeg
 - Release requirement: publish the exact corresponding source and build configuration used for the bundled binary, or provide a valid written offer alongside the release.
 
 ## Release Checklist

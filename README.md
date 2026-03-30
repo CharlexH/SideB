@@ -56,9 +56,9 @@ The app consists of two components:
 
 ### Offline playback pipeline
 
-When a user marks a track as a favorite, the app searches for a matching publicly available audio source on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp) and caches it locally as an MP3 file on the SD card. Cached audio is played back through an `ffmpeg → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache.
+When a user marks a track as a favorite, the app searches for a matching publicly available audio source on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp) and caches it locally as an MP3 file on the SD card. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is played back through the device's built-in `ffmpeg → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache.
 
-For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art when available, and adds the track to `FAV LIST` as a managed local item.
+For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art with the device's system ffmpeg when available, and adds the track to `FAV LIST` as a managed local item.
 
 **Important**: The app does **not** intercept, decrypt, or extract audio from Spotify streams. Spotify playback and offline caching use entirely separate audio paths.
 
@@ -140,7 +140,7 @@ cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
 ### Required runtime files (not tracked in git)
 
 - `package/SideB.pak/go-librespot` — Spotify Connect backend binary
-- `package/SideB.pak/ffmpeg-full` — static ffmpeg with MP3 encoder support
+- `package/SideB.pak/ffmpeg-full` — bundled FFmpeg-compatible audio transcoder with MP3 encoder support; a minimal audio-focused build is sufficient
 - `package/SideB.pak/yt-dlp` — YouTube audio downloader (aarch64 binary)
 - `package/SideB.pak/resources/ca-certificates.crt` — TLS root certificates
 - `package/SideB.pak/resources/font_mono.ttf` — UI font

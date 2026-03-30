@@ -1,6 +1,6 @@
 {
   "name": "SideB",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "TOOL",
   "description": "Retro cassette-style player for TrimUI Brick with Spotify Connect, offline favorites, and local MP3 playback",
   "author": "CharlexH",

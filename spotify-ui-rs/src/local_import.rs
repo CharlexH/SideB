@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::constants::FFMPEG_FULL_BIN;
+use crate::constants::SYSTEM_FFMPEG_BIN;
 use crate::favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
 use crate::mode::InputAction;
 use crate::paths::app_paths;
@@ -283,7 +283,7 @@ fn find_sidecar_cover(import_mp3: &Path) -> Option<PathBuf> {
 }
 
 fn extract_embedded_cover(audio_path: &Path, dest: &Path) -> bool {
-    let output = Command::new(FFMPEG_FULL_BIN)
+    let output = Command::new(embedded_cover_extractor_bin())
         .args(["-y", "-loglevel", "error", "-i"])
         .arg(audio_path)
         .args(["-an", "-map", "0:v:0", "-frames:v", "1"])
@@ -297,6 +297,10 @@ fn extract_embedded_cover(audio_path: &Path, dest: &Path) -> bool {
             false
         }
     }
+}
+
+fn embedded_cover_extractor_bin() -> &'static str {
+    SYSTEM_FFMPEG_BIN
 }
 
 #[cfg(test)]
@@ -344,5 +348,10 @@ mod tests {
         assert_eq!(next.file_name().and_then(|name| name.to_str()), Some("Artist - Song (2).mp3"));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn embedded_cover_extraction_uses_system_ffmpeg() {
+        assert_eq!(embedded_cover_extractor_bin(), "/usr/bin/ffmpeg");
     }
 }

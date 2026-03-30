@@ -7,6 +7,7 @@ binary_path="$repo_root/spotify-ui-rs/target/$target_triple/release/sideb"
 package_source="$repo_root/package/SideB.pak"
 dist_root="$repo_root/dist"
 stage_root="$dist_root/stage"
+ffmpeg_check_script="$repo_root/scripts/check_ffmpeg_audio_transcoder.sh"
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo_root/spotify-ui-rs/Cargo.toml" | head -n 1)
 if [ -z "$version" ]; then
@@ -75,9 +76,12 @@ build_platform_package() {
 require_file "$package_source/go-librespot"
 require_file "$package_source/yt-dlp"
 require_file "$package_source/ffmpeg-full"
+require_file "$ffmpeg_check_script"
 require_file "$package_source/data/config.yml"
 require_file "$repo_root/packaging/shared/LICENSES/NOTICE.md"
 require_file "$repo_root/packaging/shared/LICENSES/THIRD_PARTY_SOURCES.md"
+
+"$ffmpeg_check_script" "$package_source/ffmpeg-full"
 
 mkdir -p "$dist_root"
 

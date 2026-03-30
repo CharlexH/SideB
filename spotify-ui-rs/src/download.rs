@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use crate::constants::{FFMPEG_FULL_BIN, YTDLP_BIN};
+use crate::constants::{FFMPEG_TRANSCODER_BIN, YTDLP_BIN};
 use crate::favorites::FavoritesManager;
 use crate::paths::app_paths;
 
@@ -148,7 +148,7 @@ fn download_loop(
                     "5",
                     "--no-playlist",
                     "--ffmpeg-location",
-                    FFMPEG_FULL_BIN,
+                    FFMPEG_TRANSCODER_BIN,
                     "-o",
                     &output_template,
                     &format!("ytsearch1:{}", search_query),
