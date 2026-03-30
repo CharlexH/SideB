@@ -1,6 +1,7 @@
 # macOS
 .DS_Store
 .worktrees/
+docs/
 
 # Build artifacts
 build/
@@ -28,6 +29,9 @@ package/SideB.pak/resources/ca-certificates.crt
 *.dylib
 *.test
 *.out
+*.log
+*.tmp
+*.orig
 
 # Rust
 spotify-ui-rs/target/
