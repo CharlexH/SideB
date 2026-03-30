@@ -7,21 +7,21 @@ Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with o
 <table>
   <tr>
     <td align="center">
-      <img src="screenshots/spotify_connecting.png" alt="Spotify connecting screen" width="360"><br>
+      <img src="screenshots/spotify_connecting.png.webp" alt="Spotify connecting screen" width="360"><br>
       <strong>Spotify connecting</strong>
     </td>
     <td align="center">
-      <img src="screenshots/favlist.png" alt="Favorites list" width="360"><br>
+      <img src="screenshots/favlist.png.webp" alt="Favorites list" width="360"><br>
       <strong>FAV LIST</strong>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="screenshots/offline_playing.png" alt="Offline local playback" width="360"><br>
+      <img src="screenshots/offline_playing.png.webp" alt="Offline local playback" width="360"><br>
       <strong>Offline playback</strong>
     </td>
     <td align="center">
-      <img src="screenshots/waiting.png" alt="Waiting screen" width="360"><br>
+      <img src="screenshots/waiting.png.webp" alt="Waiting screen" width="360"><br>
       <strong>Waiting screen</strong>
     </td>
   </tr>
