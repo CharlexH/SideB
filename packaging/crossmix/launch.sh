@@ -25,7 +25,7 @@ cp "$progdir/sideb" /tmp/sideb
 chmod +x /tmp/go-librespot /tmp/sideb
 
 [ -f "$progdir/yt-dlp" ] && cp "$progdir/yt-dlp" /tmp/yt-dlp && chmod +x /tmp/yt-dlp
-[ -f "$progdir/ffmpeg-full" ] && cp "$progdir/ffmpeg-full" /tmp/ffmpeg-full && chmod +x /tmp/ffmpeg-full
+[ -f "$progdir/ffmpeg" ] && cp "$progdir/ffmpeg" /tmp/ffmpeg && chmod +x /tmp/ffmpeg
 
 mkdir -p "$SIDEB_DATA_DIR"
 /tmp/go-librespot --config_dir "$SIDEB_DATA_DIR" > /tmp/go-librespot.log 2>&1 &

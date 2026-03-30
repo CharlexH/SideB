@@ -35,3 +35,5 @@ package/SideB.pak/resources/ca-certificates.crt
 
 # Rust
 spotify-ui-rs/target/
+/package
+/package

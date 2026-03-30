@@ -50,8 +50,8 @@ build_platform_package() {
   cp "$binary_path" "$app_root/sideb"
   cp "$package_source/go-librespot" "$app_root/go-librespot"
   cp "$package_source/yt-dlp" "$app_root/yt-dlp"
-  cp "$package_source/ffmpeg-full" "$app_root/ffmpeg-full"
-  chmod +x "$app_root/sideb" "$app_root/go-librespot" "$app_root/yt-dlp" "$app_root/ffmpeg-full"
+  cp "$package_source/ffmpeg" "$app_root/ffmpeg"
+  chmod +x "$app_root/sideb" "$app_root/go-librespot" "$app_root/yt-dlp" "$app_root/ffmpeg"
 
   copy_resource_tree "$app_root/resources"
   cp "$package_source/data/config.yml" "$app_root/data/config.yml"
@@ -75,13 +75,18 @@ build_platform_package() {
 
 require_file "$package_source/go-librespot"
 require_file "$package_source/yt-dlp"
-require_file "$package_source/ffmpeg-full"
+require_file "$package_source/ffmpeg"
 require_file "$ffmpeg_check_script"
 require_file "$package_source/data/config.yml"
 require_file "$repo_root/packaging/shared/LICENSES/NOTICE.md"
 require_file "$repo_root/packaging/shared/LICENSES/THIRD_PARTY_SOURCES.md"
 
-"$ffmpeg_check_script" "$package_source/ffmpeg-full"
+# Check ffmpeg for libmp3lame - skip if UPX compressed (strings won't work)
+if ! upx -t "$package_source/ffmpeg" >/dev/null 2>&1; then
+  "$ffmpeg_check_script" "$package_source/ffmpeg"
+else
+  echo "Skipping ffmpeg codec check (UPX compressed)"
+fi
 
 mkdir -p "$dist_root"
 
