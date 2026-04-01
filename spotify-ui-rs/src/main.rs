@@ -73,6 +73,18 @@ fn main() {
     // Load assets
     let assets = Assets::load();
 
+    // Show a lightweight startup page before heavy render cache initialization.
+    let mut back_buf = vec![0u8; FB_SIZE];
+    let startup_scene = render::build_startup_scene(
+        &assets.tape_base,
+        &assets.tape_a,
+        &assets.taperoll,
+        &assets.wheel,
+        &fonts,
+    );
+    back_buf.copy_from_slice(&startup_scene);
+    fb.swap_buffers(&back_buf);
+
     // Initialize render state (pre-computes all caches)
     eprintln!("building render caches...");
     let render_state = RenderState::init(
@@ -140,9 +152,6 @@ fn main() {
             load_local_cover(&entry, &render_state);
         }
     }
-
-    // Allocate back buffer
-    let mut back_buf = vec![0u8; FB_SIZE];
 
     // Initial render
     {
