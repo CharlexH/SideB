@@ -197,6 +197,137 @@ fn playback_footer_labels() -> [&'static str; 6] {
     ]
 }
 
+fn waiting_status_message(startup_loading: bool) -> &'static str {
+    if startup_loading {
+        "Loading Tape"
+    } else {
+        "Waiting for Spotify..."
+    }
+}
+
+fn waiting_exit_hint(startup_loading: bool) -> Option<&'static str> {
+    if startup_loading {
+        None
+    } else {
+        Some("EXIT [B]")
+    }
+}
+
+fn draw_footer_hints(buf: &mut [u8], fonts: &FontSet) {
+    let hint_labels = playback_footer_labels();
+
+    let total_width: i32 = hint_labels
+        .iter()
+        .map(|l| fonts.measure_text(l, fonts.scale_small))
+        .sum();
+
+    let start_x = 28;
+    let available = (SCREEN_W as i32 - 56) - total_width;
+    let gap = if hint_labels.len() > 1 {
+        if available > 0 {
+            available / (hint_labels.len() as i32 - 1)
+        } else {
+            4
+        }
+    } else {
+        0
+    };
+
+    let mut x = start_x;
+    for label in &hint_labels {
+        fonts.draw_text(
+            buf,
+            label,
+            x,
+            HINTS_BASELINE_Y,
+            0x3D,
+            0x3D,
+            0x3D,
+            fonts.scale_small,
+        );
+        x += fonts.measure_text(label, fonts.scale_small) + gap;
+    }
+}
+
+fn draw_waiting_text(buf: &mut [u8], fonts: &FontSet, startup_loading: bool) {
+    let msg = waiting_status_message(startup_loading);
+
+    drawing::fill_rect(
+        buf,
+        0,
+        HINTS_BASELINE_Y - 28,
+        SCREEN_W as i32,
+        48,
+        0,
+        0,
+        0,
+        255,
+    );
+
+    let msg_w = fonts.measure_text(msg, fonts.scale_large);
+    fonts.draw_text(
+        buf,
+        msg,
+        SCREEN_W as i32 / 2 - msg_w / 2,
+        STATUS_BASELINE_Y,
+        255,
+        255,
+        255,
+        fonts.scale_large,
+    );
+
+    if let Some(exit_hint) = waiting_exit_hint(startup_loading) {
+        let hint_w = fonts.measure_text(exit_hint, fonts.scale_small);
+        fonts.draw_text(
+            buf,
+            exit_hint,
+            SCREEN_W as i32 / 2 - hint_w / 2,
+            HINTS_BASELINE_Y,
+            255,
+            255,
+            255,
+            fonts.scale_small,
+        );
+    }
+}
+
+pub fn build_startup_scene(
+    tape_base: &RgbaImage,
+    tape_a: &RgbaImage,
+    taperoll: &RgbaImage,
+    wheel: &RgbaImage,
+    fonts: &FontSet,
+) -> Vec<u8> {
+    let overlay_window = image_ops::build_overlay_window(tape_a);
+    let foreground = image_ops::build_cassette_foreground(tape_base, &overlay_window);
+    let mut scene = vec![0u8; FB_SIZE];
+
+    drawing::clear_buffer(&mut scene, 0, 0, 0, 255);
+    draw_footer_hints(&mut scene, fonts);
+
+    let left_roll = image_ops::scale_nearest(taperoll, LEFT_ROLL_MIN_SIZE as u32);
+    let right_roll = image_ops::scale_nearest(taperoll, RIGHT_ROLL_MAX_SIZE as u32);
+    drawing::draw_image_alpha(
+        &mut scene,
+        &left_roll,
+        LEFT_ROLL_CENTER_X - LEFT_ROLL_MIN_SIZE / 2,
+        ROLL_CENTER_Y - LEFT_ROLL_MIN_SIZE / 2,
+    );
+    drawing::draw_image_alpha(
+        &mut scene,
+        &right_roll,
+        RIGHT_ROLL_CENTER_X - RIGHT_ROLL_MAX_SIZE / 2,
+        ROLL_CENTER_Y - RIGHT_ROLL_MAX_SIZE / 2,
+    );
+
+    drawing::draw_image_alpha(&mut scene, &foreground, TAPE_BASE_X, TAPE_BASE_Y);
+    drawing::draw_image_alpha(&mut scene, wheel, LEFT_WHEEL_X, LEFT_WHEEL_Y);
+    drawing::draw_image_alpha(&mut scene, wheel, RIGHT_WHEEL_X, RIGHT_WHEEL_Y);
+
+    draw_waiting_text(&mut scene, fonts, true);
+    scene
+}
+
 /// Holds all pre-computed scene buffers and caches.
 pub struct RenderState {
     pub scene_base: Vec<u8>,
@@ -269,40 +400,7 @@ impl RenderState {
     /// Draw the base scene (hint labels at bottom).
     fn rebuild_base_scene(&mut self, fonts: &FontSet) {
         drawing::clear_buffer(&mut self.scene_base, 0, 0, 0, 255);
-
-        let hint_labels = playback_footer_labels();
-
-        let total_width: i32 = hint_labels
-            .iter()
-            .map(|l| fonts.measure_text(l, fonts.scale_small))
-            .sum();
-
-        let start_x = 28;
-        let available = (SCREEN_W as i32 - 56) - total_width;
-        let gap = if hint_labels.len() > 1 {
-            if available > 0 {
-                available / (hint_labels.len() as i32 - 1)
-            } else {
-                4
-            }
-        } else {
-            0
-        };
-
-        let mut x = start_x;
-        for label in &hint_labels {
-            fonts.draw_text(
-                &mut self.scene_base,
-                label,
-                x,
-                HINTS_BASELINE_Y,
-                0x3D,
-                0x3D,
-                0x3D,
-                fonts.scale_small,
-            );
-            x += fonts.measure_text(label, fonts.scale_small) + gap;
-        }
+        draw_footer_hints(&mut self.scene_base, fonts);
     }
 
     /// Rebuild the playing scene with optional cover art.
@@ -402,46 +500,7 @@ impl RenderState {
             drawing::draw_image_alpha(&mut self.scene_waiting, wf, RIGHT_WHEEL_X, RIGHT_WHEEL_Y);
         }
 
-        // Draw "Waiting..." message
-        let msg = "Waiting for Spotify...";
-        let exit_hint = "EXIT [B]";
-
-        // Clear hints area and draw centered text
-        drawing::fill_rect(
-            &mut self.scene_waiting,
-            0,
-            HINTS_BASELINE_Y - 28,
-            SCREEN_W as i32,
-            48,
-            0,
-            0,
-            0,
-            255,
-        );
-
-        let msg_w = fonts.measure_text(msg, fonts.scale_large);
-        fonts.draw_text(
-            &mut self.scene_waiting,
-            msg,
-            SCREEN_W as i32 / 2 - msg_w / 2,
-            STATUS_BASELINE_Y,
-            255,
-            255,
-            255,
-            fonts.scale_large,
-        );
-
-        let hint_w = fonts.measure_text(exit_hint, fonts.scale_small);
-        fonts.draw_text(
-            &mut self.scene_waiting,
-            exit_hint,
-            SCREEN_W as i32 / 2 - hint_w / 2,
-            HINTS_BASELINE_Y,
-            255,
-            255,
-            255,
-            fonts.scale_small,
-        );
+        draw_waiting_text(&mut self.scene_waiting, fonts, false);
 
         self.full_redraw = true;
     }
@@ -938,6 +997,18 @@ mod tests {
                 "EXIT (B)",
             ]
         );
+    }
+
+    #[test]
+    fn waiting_status_message_switches_for_startup_loading() {
+        assert_eq!(waiting_status_message(true), "Loading Tape");
+        assert_eq!(waiting_status_message(false), "Waiting for Spotify...");
+    }
+
+    #[test]
+    fn waiting_exit_hint_is_hidden_during_startup_loading() {
+        assert_eq!(waiting_exit_hint(true), None);
+        assert_eq!(waiting_exit_hint(false), Some("EXIT [B]"));
     }
 
     #[test]

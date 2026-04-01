@@ -36,14 +36,6 @@ mkdir -p "$SIDEB_DATA_DIR"
 /tmp/go-librespot --config_dir "$SIDEB_DATA_DIR" > /tmp/go-librespot.log 2>&1 &
 BACKEND_PID=$!
 
-# Wait for API to be ready
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -s http://127.0.0.1:3678/status > /dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
-
 # Start UI
 /tmp/sideb 2>/tmp/sideb.log
 
