@@ -158,7 +158,11 @@ fn truncate_chars_with_ellipsis(text: &str, max_chars: usize) -> String {
         return "…".to_string();
     }
 
-    chars.into_iter().take(max_chars - 1).chain(std::iter::once('…')).collect()
+    chars
+        .into_iter()
+        .take(max_chars - 1)
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 fn format_track_info(track_name: &str, artist_name: &str, max_chars: usize) -> Option<String> {
@@ -234,8 +238,7 @@ impl RenderState {
         let overlay_window = image_ops::build_overlay_window(tape_a);
         let scene_foreground = image_ops::build_cassette_foreground(tape_base, &overlay_window);
         let wheel_frames = image_ops::build_rotated_frames(wheel, ROTATION_FRAME_COUNT);
-        let taperoll_cache =
-            image_ops::build_taperoll_frame_cache(taperoll, TAPEROLL_FRAME_COUNT);
+        let taperoll_cache = image_ops::build_taperoll_frame_cache(taperoll, TAPEROLL_FRAME_COUNT);
 
         let mut rs = Self {
             scene_base: vec![0u8; FB_SIZE],
@@ -309,9 +312,8 @@ impl RenderState {
 
     fn rebuild_playing_scene_locked(&mut self, cover: Option<&RgbaImage>) {
         self.scene_playing.copy_from_slice(&self.scene_base);
-        self.scene_cover = cover.map(|img| {
-            image_ops::build_masked_cover(img, self.cover_mask.as_ref())
-        });
+        self.scene_cover =
+            cover.map(|img| image_ops::build_masked_cover(img, self.cover_mask.as_ref()));
         if let Some(cover) = &self.scene_cover {
             drawing::draw_image_alpha(&mut self.scene_playing, cover, COVER_X, COVER_Y);
         }
@@ -477,8 +479,8 @@ pub fn render(
 
     // Dirty rects
     let dirty_rects: [(i32, i32, i32, i32); 3] = [
-        (88, 64, 536, 520),    // left roll
-        (488, 64, 936, 520),   // right roll
+        (88, 64, 536, 520),             // left roll
+        (488, 64, 936, 520),            // right roll
         (0, 620, SCREEN_W as i32, 690), // info bar
     ];
 
@@ -647,15 +649,18 @@ pub fn render_loop(
                     let mut st = app_state.lock().unwrap();
                     if let Some(msg) = st.active_confirmation_message(std::time::Instant::now()) {
                         // Clear the status bar area (620–690), preserve "EXIT [B]" hint at 736
-                        drawing::fill_rect(
-                            back_buf, 0, 620,
-                            SCREEN_W as i32, 70, 0, 0, 0, 255,
-                        );
+                        drawing::fill_rect(back_buf, 0, 620, SCREEN_W as i32, 70, 0, 0, 0, 255);
                         let msg_w = fonts.measure_text(msg, fonts.scale_large);
                         let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
                         fonts.draw_text(
-                            back_buf, msg, msg_x, STATUS_BASELINE_Y,
-                            200, 200, 200, fonts.scale_large,
+                            back_buf,
+                            msg,
+                            msg_x,
+                            STATUS_BASELINE_Y,
+                            200,
+                            200,
+                            200,
+                            fonts.scale_large,
                         );
                     }
                 }
@@ -691,7 +696,9 @@ pub fn render_loop(
                         msg,
                         msg_x,
                         STATUS_BASELINE_Y,
-                        200, 200, 200,
+                        200,
+                        200,
+                        200,
                         fonts.scale_large,
                     );
                 } else {
@@ -726,7 +733,9 @@ pub fn render_loop(
                         &time_remaining,
                         time_x,
                         STATUS_BASELINE_Y,
-                        255, 255, 255,
+                        255,
+                        255,
+                        255,
                         fonts.scale_large,
                     );
 
@@ -742,7 +751,8 @@ pub fn render_loop(
                     }
 
                     // Center: track info
-                    if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30) {
+                    if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30)
+                    {
                         let info_w = fonts.measure_text(&info_text, fonts.scale_large);
                         let info_x = centered_text_x(SCREEN_W as i32, info_w);
                         fonts.draw_text(
@@ -750,7 +760,9 @@ pub fn render_loop(
                             &info_text,
                             info_x,
                             STATUS_BASELINE_Y,
-                            255, 255, 255,
+                            255,
+                            255,
+                            255,
                             fonts.scale_large,
                         );
                     }
@@ -814,7 +826,14 @@ fn render_playlist(
     } else {
         Some(playing_uri.as_str())
     };
-    playlist_view::render_playlist_overlay(buf, &entries, selected, uri_ref, confirm_message, fonts);
+    playlist_view::render_playlist_overlay(
+        buf,
+        &entries,
+        selected,
+        uri_ref,
+        confirm_message,
+        fonts,
+    );
 }
 
 #[cfg(test)]
@@ -897,7 +916,10 @@ mod tests {
         let now = Instant::now();
 
         for i in 0..120 {
-            mode.record_render(Duration::from_millis(6), now + Duration::from_millis(i * 33));
+            mode.record_render(
+                Duration::from_millis(6),
+                now + Duration::from_millis(i * 33),
+            );
         }
 
         assert_eq!(mode.target_fps(), BASE_ANIM_FPS);
@@ -924,7 +946,10 @@ mod tests {
         let now = Instant::now();
 
         for i in 0..120 {
-            mode.record_render(Duration::from_millis(6), now + Duration::from_millis(i * 33));
+            mode.record_render(
+                Duration::from_millis(6),
+                now + Duration::from_millis(i * 33),
+            );
         }
         assert_eq!(mode.target_fps(), BASE_ANIM_FPS);
 
@@ -983,7 +1008,10 @@ mod tests {
         );
 
         assert!(rs.scene_cover.is_none());
-        assert_eq!(rs.requested_cover_url.as_deref(), Some("https://img/cover-b"));
+        assert_eq!(
+            rs.requested_cover_url.as_deref(),
+            Some("https://img/cover-b")
+        );
         assert_eq!(rs.applied_cover_url, None);
         assert!(rs.full_redraw);
     }
@@ -1021,7 +1049,10 @@ mod tests {
         }
 
         let mut rs = empty_render_state();
-        let mut foreground = RgbaImage::new((COVER_X - TAPE_BASE_X + 1) as u32, (COVER_Y - TAPE_BASE_Y + 1) as u32);
+        let mut foreground = RgbaImage::new(
+            (COVER_X - TAPE_BASE_X + 1) as u32,
+            (COVER_Y - TAPE_BASE_Y + 1) as u32,
+        );
         foreground.set_pixel(
             (COVER_X - TAPE_BASE_X) as u32,
             (COVER_Y - TAPE_BASE_Y) as u32,
@@ -1060,7 +1091,10 @@ mod tests {
         rs.full_redraw = false;
         rs.replace_cover("https://img/cover-b", &new_cover);
 
-        assert_eq!(rs.requested_cover_url.as_deref(), Some("https://img/cover-b"));
+        assert_eq!(
+            rs.requested_cover_url.as_deref(),
+            Some("https://img/cover-b")
+        );
         assert_eq!(rs.applied_cover_url.as_deref(), Some("https://img/cover-b"));
         assert!(rs.scene_cover.is_some());
 

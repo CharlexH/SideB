@@ -67,8 +67,7 @@ pub fn quantize_roll_size(size: i32) -> i32 {
     if size == LEFT_ROLL_MAX_SIZE {
         return LEFT_ROLL_MAX_SIZE;
     }
-    let steps =
-        ((size - LEFT_ROLL_MIN_SIZE) as f64 / TAPEROLL_SIZE_STEP as f64).round() as i32;
+    let steps = ((size - LEFT_ROLL_MIN_SIZE) as f64 / TAPEROLL_SIZE_STEP as f64).round() as i32;
     let quantized = LEFT_ROLL_MIN_SIZE + steps * TAPEROLL_SIZE_STEP;
     if quantized > LEFT_ROLL_MAX_SIZE {
         LEFT_ROLL_MAX_SIZE
@@ -109,7 +108,8 @@ pub fn roll_sizes_for_progress(progress: f64) -> (i32, i32) {
     let progress = progress.clamp(0.0, 1.0);
     let range = (LEFT_ROLL_MAX_SIZE - LEFT_ROLL_MIN_SIZE) as f64;
     let left = LEFT_ROLL_MIN_SIZE + (range * progress).round() as i32;
-    let right = RIGHT_ROLL_MAX_SIZE - ((RIGHT_ROLL_MAX_SIZE - RIGHT_ROLL_MIN_SIZE) as f64 * progress).round() as i32;
+    let right = RIGHT_ROLL_MAX_SIZE
+        - ((RIGHT_ROLL_MAX_SIZE - RIGHT_ROLL_MIN_SIZE) as f64 * progress).round() as i32;
     (left, right)
 }
 
@@ -180,10 +180,7 @@ pub fn build_masked_cover(img: &RgbaImage, mask: Option<&RgbaImage>) -> RgbaImag
 }
 
 /// Build cassette foreground composite (tapeBase + overlay window).
-pub fn build_cassette_foreground(
-    tape_base: &RgbaImage,
-    overlay_window: &RgbaImage,
-) -> RgbaImage {
+pub fn build_cassette_foreground(tape_base: &RgbaImage, overlay_window: &RgbaImage) -> RgbaImage {
     let mut dst = RgbaImage::new(992, 584);
 
     // Draw tapeBase
@@ -229,7 +226,14 @@ pub fn build_cassette_foreground(
                 let out_r = (sr as i32 * a + dr as i32 * da as i32 * inv / 255) / out_a;
                 let out_g = (sg as i32 * a + dg as i32 * da as i32 * inv / 255) / out_a;
                 let out_b = (sb as i32 * a + db as i32 * da as i32 * inv / 255) / out_a;
-                dst.set_pixel(dx as u32, dy as u32, out_r as u8, out_g as u8, out_b as u8, out_a as u8);
+                dst.set_pixel(
+                    dx as u32,
+                    dy as u32,
+                    out_r as u8,
+                    out_g as u8,
+                    out_b as u8,
+                    out_a as u8,
+                );
             }
         }
     }
@@ -270,19 +274,10 @@ mod tests {
     #[test]
     fn test_frame_index_for_angle() {
         assert_eq!(frame_index_for_angle(0.0, 60), 0);
-        assert_eq!(
-            frame_index_for_angle(std::f64::consts::FRAC_PI_2, 60),
-            15
-        );
+        assert_eq!(frame_index_for_angle(std::f64::consts::FRAC_PI_2, 60), 15);
         assert_eq!(frame_index_for_angle(std::f64::consts::PI, 60), 30);
-        assert_eq!(
-            frame_index_for_angle(2.0 * std::f64::consts::PI, 60),
-            0
-        );
-        assert_eq!(
-            frame_index_for_angle(-std::f64::consts::FRAC_PI_2, 60),
-            45
-        );
+        assert_eq!(frame_index_for_angle(2.0 * std::f64::consts::PI, 60), 0);
+        assert_eq!(frame_index_for_angle(-std::f64::consts::FRAC_PI_2, 60), 45);
     }
 
     #[test]
@@ -306,10 +301,9 @@ mod tests {
         let sizes = roll_cache_sizes();
         assert_eq!(sizes.first(), Some(&LEFT_ROLL_MIN_SIZE));
         assert_eq!(sizes.last(), Some(&LEFT_ROLL_MAX_SIZE));
-        let expected_len =
-            ((LEFT_ROLL_MAX_SIZE - LEFT_ROLL_MIN_SIZE + TAPEROLL_SIZE_STEP - 1) / TAPEROLL_SIZE_STEP)
-                as usize
-                + 1;
+        let expected_len = ((LEFT_ROLL_MAX_SIZE - LEFT_ROLL_MIN_SIZE + TAPEROLL_SIZE_STEP - 1)
+            / TAPEROLL_SIZE_STEP) as usize
+            + 1;
         assert_eq!(sizes.len(), expected_len);
         for window in sizes.windows(2) {
             let diff = window[1] - window[0];

@@ -128,13 +128,7 @@ pub fn draw_image_alpha(buf: &mut [u8], img: &RgbaImage, x: i32, y: i32) {
 }
 
 /// Draw an RGBA image with nearest-neighbor scaling, centered at (cx, cy).
-pub fn draw_image_scaled(
-    buf: &mut [u8],
-    img: &RgbaImage,
-    center_x: i32,
-    center_y: i32,
-    size: i32,
-) {
+pub fn draw_image_scaled(buf: &mut [u8], img: &RgbaImage, center_x: i32, center_y: i32, size: i32) {
     if size <= 0 {
         return;
     }
@@ -230,16 +224,7 @@ pub fn draw_heart_filled(buf: &mut [u8], x: i32, y: i32, size: i32, r: u8, g: u8
 }
 
 /// Draw an outline heart at (x, y) with given size.
-pub fn draw_heart_outline(
-    buf: &mut [u8],
-    x: i32,
-    y: i32,
-    size: i32,
-    r: u8,
-    g: u8,
-    b: u8,
-    a: u8,
-) {
+pub fn draw_heart_outline(buf: &mut [u8], x: i32, y: i32, size: i32, r: u8, g: u8, b: u8, a: u8) {
     let half = size as f64 / 2.0;
     let thickness = 0.12; // border width in normalized coords
     for dy in 0..size {

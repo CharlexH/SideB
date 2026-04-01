@@ -382,7 +382,10 @@ mod tests {
 
         assert_eq!(layout.text_y, item_y + 32);
         assert_eq!(layout.indicator_y, item_y + PLAYLIST_ITEM_HEIGHT / 2 - 2);
-        assert_eq!(layout.triangle_center_y, item_y + PLAYLIST_ITEM_HEIGHT / 2 - 1);
+        assert_eq!(
+            layout.triangle_center_y,
+            item_y + PLAYLIST_ITEM_HEIGHT / 2 - 1
+        );
         assert_eq!(layout.triangle_height, 20);
         assert_eq!(layout.triangle_width, 10);
         assert_eq!(layout.triangle_text_gap, 8);
@@ -401,9 +404,17 @@ mod tests {
 
         assert!(!triangle_pixel_visible(0, -9, &layout));
         assert!(!triangle_pixel_visible(0, 9, &layout));
-        assert!(!triangle_pixel_visible(layout.triangle_width - 1, 0, &layout));
+        assert!(!triangle_pixel_visible(
+            layout.triangle_width - 1,
+            0,
+            &layout
+        ));
         assert!(triangle_pixel_visible(1, -8, &layout));
-        assert!(triangle_pixel_visible(layout.triangle_width - 2, 0, &layout));
+        assert!(triangle_pixel_visible(
+            layout.triangle_width - 2,
+            0,
+            &layout
+        ));
     }
 
     #[test]

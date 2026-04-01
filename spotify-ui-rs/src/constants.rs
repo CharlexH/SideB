@@ -74,7 +74,6 @@ pub const KEY_MENU: u16 = 139;
 // Debounce
 pub const DEBOUNCE_MS: u128 = 500;
 
-
 // Playlist overlay
 pub const PLAYLIST_MARGIN: i32 = 48;
 pub const PLAYLIST_X: i32 = PLAYLIST_MARGIN;

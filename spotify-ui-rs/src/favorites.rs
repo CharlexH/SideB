@@ -88,7 +88,6 @@ impl FavoritesManager {
 
     /// Add a new favorite entry. Saves immediately.
     pub fn add(&mut self, entry: FavoriteEntry) {
-        // Don't add duplicates
         if self.entries.iter().any(|e| e.uri == entry.uri) {
             return;
         }
@@ -117,8 +116,6 @@ impl FavoritesManager {
     }
 
     pub fn delete_entry_files(entry: &FavoriteEntry) {
-
-        // Delete MP3 file
         if let Some(ref fp) = entry.file_path {
             if Path::new(fp).exists() {
                 if let Err(e) = fs::remove_file(fp) {
@@ -127,7 +124,6 @@ impl FavoritesManager {
             }
         }
 
-        // Delete cover file
         if let Some(ref cp) = entry.cover_path {
             if Path::new(cp).exists() {
                 let _ = fs::remove_file(cp);

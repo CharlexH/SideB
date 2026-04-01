@@ -163,7 +163,10 @@ fn import_one(import_mp3: &Path, music_dir: &Path) -> Result<FavoriteEntry, Stri
         );
         Some(embedded_cover_target)
     } else if let Some(sidecar) = import_sidecar.as_ref() {
-        let ext = sidecar.extension().and_then(|ext| ext.to_str()).unwrap_or("jpg");
+        let ext = sidecar
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("jpg");
         let target_cover = unique_target_path(music_dir, &base_name, ext);
         match fs::copy(sidecar, &target_cover) {
             Ok(_) => {
@@ -246,14 +249,19 @@ fn probe_metadata(path: &Path) -> Option<ImportMetadata> {
 
     parse_ffprobe_metadata(
         &String::from_utf8_lossy(&output.stdout),
-        path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Imported Track"),
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Imported Track"),
     )
 }
 
 fn resolve_metadata(path: &Path, fallback_stem: &str) -> (ImportMetadata, MetadataSource) {
     match probe_metadata(path) {
         Some(metadata) => (metadata, MetadataSource::Ffprobe),
-        None => (metadata_from_filename(fallback_stem), MetadataSource::Filename),
+        None => (
+            metadata_from_filename(fallback_stem),
+            MetadataSource::Filename,
+        ),
     }
 }
 
@@ -267,9 +275,18 @@ fn parse_ffprobe_metadata(json: &str, fallback_stem: &str) -> Option<ImportMetad
         album: None,
     });
 
-    let title = tags.title.filter(|s| !s.trim().is_empty()).unwrap_or(fallback.title);
-    let artist = tags.artist.filter(|s| !s.trim().is_empty()).unwrap_or(fallback.artist);
-    let album = tags.album.filter(|s| !s.trim().is_empty()).unwrap_or(fallback.album);
+    let title = tags
+        .title
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(fallback.title);
+    let artist = tags
+        .artist
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(fallback.artist);
+    let album = tags
+        .album
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(fallback.album);
     let duration_ms = format
         .duration
         .and_then(|s| s.parse::<f64>().ok())
@@ -413,7 +430,10 @@ mod tests {
         fs::write(&existing, b"test").unwrap();
 
         let next = unique_target_path(&base, "Artist - Song", "mp3");
-        assert_eq!(next.file_name().and_then(|name| name.to_str()), Some("Artist - Song (2).mp3"));
+        assert_eq!(
+            next.file_name().and_then(|name| name.to_str()),
+            Some("Artist - Song (2).mp3")
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

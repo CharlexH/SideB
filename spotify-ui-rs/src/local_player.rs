@@ -120,9 +120,18 @@ impl LocalPlayer {
                     self.paused_elapsed = Duration::ZERO;
                     eprintln!(
                         "local_player: pipeline ready uri={} ffmpeg_pid={} aplay_pid={}",
-                        self.current_entry.as_ref().map(|entry| entry.uri.as_str()).unwrap_or("unknown"),
-                        self.ffmpeg_child.as_ref().map(|child| child.id()).unwrap_or_default(),
-                        self.aplay_child.as_ref().map(|child| child.id()).unwrap_or_default()
+                        self.current_entry
+                            .as_ref()
+                            .map(|entry| entry.uri.as_str())
+                            .unwrap_or("unknown"),
+                        self.ffmpeg_child
+                            .as_ref()
+                            .map(|child| child.id())
+                            .unwrap_or_default(),
+                        self.aplay_child
+                            .as_ref()
+                            .map(|child| child.id())
+                            .unwrap_or_default()
                     );
                     return;
                 }
@@ -212,7 +221,10 @@ impl LocalPlayer {
             return;
         }
 
-        let current_uri = self.playlist.get(self.playlist_index).map(|e| e.uri.clone());
+        let current_uri = self
+            .playlist
+            .get(self.playlist_index)
+            .map(|e| e.uri.clone());
 
         // Add new entries that aren't already in the playlist
         let existing_uris: std::collections::HashSet<String> =

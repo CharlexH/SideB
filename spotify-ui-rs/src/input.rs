@@ -153,7 +153,10 @@ fn playlist_repeat_loop(
     while !quit.load(Ordering::Relaxed) {
         let playlist_visible = state.lock().unwrap().playlist_visible;
         let now = Instant::now();
-        let action = repeat_state.lock().unwrap().due_action(playlist_visible, now);
+        let action = repeat_state
+            .lock()
+            .unwrap()
+            .due_action(playlist_visible, now);
         if let Some(action) = action {
             let _ = cmd_tx.send(action);
         }
@@ -250,7 +253,7 @@ fn handle_normal_input(
 
             BTN_B => {
                 let _ = cmd_tx.send(InputAction::RequestExit);
-            },
+            }
 
             BTN_X => {
                 if mode != AppMode::Waiting {
@@ -378,11 +381,11 @@ mod tests {
         let now = Instant::now();
         let mut repeat = PlaylistRepeatState::default();
 
+        assert_eq!(repeat.on_axis_value(-1, now), Some(InputAction::PlaylistUp));
         assert_eq!(
-            repeat.on_axis_value(-1, now),
-            Some(InputAction::PlaylistUp)
+            repeat.due_action(true, now + Duration::from_millis(299)),
+            None
         );
-        assert_eq!(repeat.due_action(true, now + Duration::from_millis(299)), None);
         assert_eq!(
             repeat.due_action(true, now + Duration::from_millis(300)),
             Some(InputAction::PlaylistUp)
@@ -399,7 +402,10 @@ mod tests {
             repeat.due_action(true, now + Duration::from_millis(300)),
             Some(InputAction::PlaylistDown)
         );
-        assert_eq!(repeat.due_action(true, now + Duration::from_millis(419)), None);
+        assert_eq!(
+            repeat.due_action(true, now + Duration::from_millis(419)),
+            None
+        );
         assert_eq!(
             repeat.due_action(true, now + Duration::from_millis(420)),
             Some(InputAction::PlaylistDown)
@@ -411,7 +417,13 @@ mod tests {
         let now = Instant::now();
         let mut repeat = PlaylistRepeatState::default();
         let _ = repeat.on_axis_value(-1, now);
-        assert_eq!(repeat.on_axis_value(0, now + Duration::from_millis(50)), None);
-        assert_eq!(repeat.due_action(true, now + Duration::from_millis(400)), None);
+        assert_eq!(
+            repeat.on_axis_value(0, now + Duration::from_millis(50)),
+            None
+        );
+        assert_eq!(
+            repeat.due_action(true, now + Duration::from_millis(400)),
+            None
+        );
     }
 }

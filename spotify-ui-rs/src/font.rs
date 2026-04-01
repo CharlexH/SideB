@@ -4,8 +4,8 @@ use crate::constants::*;
 
 pub struct FontSet {
     font: FontVec,
-    pub scale_large: PxScale,  // 28pt @ 72dpi
-    pub scale_small: PxScale,  // 20pt @ 72dpi
+    pub scale_large: PxScale, // 28pt @ 72dpi
+    pub scale_small: PxScale, // 20pt @ 72dpi
 }
 
 impl FontSet {
@@ -109,10 +109,11 @@ impl FontSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_font_metrics() {
-        let data = crate::resources::load_font_data().expect("font data should be discoverable in tests");
+        let data =
+            crate::resources::load_font_data().expect("font data should be discoverable in tests");
         let font = FontVec::try_from_vec(data).unwrap();
         let upem = font.units_per_em().unwrap();
         let ascent = font.ascent_unscaled();

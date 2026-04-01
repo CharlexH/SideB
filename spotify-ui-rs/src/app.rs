@@ -41,7 +41,7 @@ pub struct AppState {
     // -- Mode & local playback --
     pub mode: AppMode,
     pub is_favorited: bool,
-    pub local_was_playing: bool,
+    pub spotify_preempted_local_uri: Option<String>,
 
     // -- Playlist overlay --
     pub playlist_visible: bool,
@@ -79,7 +79,7 @@ impl AppState {
 
             mode: AppMode::default(),
             is_favorited: false,
-            local_was_playing: false,
+            spotify_preempted_local_uri: None,
 
             playlist_visible: false,
             playlist_selected: 0,
@@ -290,14 +290,11 @@ impl Assets {
             tape_base: load_image_resource("tapeBase.png")
                 .expect("required resource: tapeBase.png"),
             tape_a: load_image_resource("tapeA.png").expect("required resource: tapeA.png"),
-            taperoll: load_image_resource("taperoll.png")
-                .expect("required resource: taperoll.png"),
+            taperoll: load_image_resource("taperoll.png").expect("required resource: taperoll.png"),
             wheel: load_image_resource("wheel.png").expect("required resource: wheel.png"),
             cover_mask: load_image_resource("cover_mask.png"),
-            playing: load_image_resource("play.png")
-                .or_else(|| load_image_resource("playing.png")),
-            paused: load_image_resource("pause.png")
-                .or_else(|| load_image_resource("paused.png")),
+            playing: load_image_resource("play.png").or_else(|| load_image_resource("playing.png")),
+            paused: load_image_resource("pause.png").or_else(|| load_image_resource("paused.png")),
             spotify_on: load_image_resource("spotify_on.png"),
             spotify_off: load_image_resource("spotify_off.png"),
             fav_on: load_image_resource("fav_on.png"),

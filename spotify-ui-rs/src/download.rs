@@ -64,13 +64,14 @@ impl DownloadManager {
         } else {
             eprintln!(
                 "download: queued uri={} track={} - {} pending={}",
-                uri,
-                artist_name,
-                track_name,
-                pending_count
+                uri, artist_name, track_name, pending_count
             );
         }
     }
+}
+
+fn build_search_query(request: &DownloadRequest) -> String {
+    format!("{} - {}", request.artist_name, request.track_name)
 }
 
 /// Sanitize a string for use as a filename.
@@ -97,7 +98,6 @@ fn download_loop(
             req.uri, req.artist_name, req.track_name
         );
 
-        // Check if still favorited (user may have unfavorited while queued)
         {
             let fav = favorites.lock().unwrap();
             if !fav.is_favorited(&req.uri) {
@@ -105,7 +105,6 @@ fn download_loop(
                 pending_uris.lock().unwrap().remove(&req.uri);
                 continue;
             }
-            // Skip if already downloaded
             if fav.find_by_uri(&req.uri).map_or(false, |e| e.downloaded) {
                 eprintln!("download: skipping (already downloaded): {}", req.uri);
                 pending_uris.lock().unwrap().remove(&req.uri);
@@ -113,7 +112,6 @@ fn download_loop(
             }
         }
 
-        // Ensure music directory exists
         let music_dir = app_paths().music_dir.clone();
         let _ = std::fs::create_dir_all(&music_dir);
 
@@ -129,7 +127,6 @@ fn download_loop(
             cover_path.display()
         );
 
-        // Clean up partial file from previous failed attempt
         if output_path.exists() {
             let is_downloaded = favorites
                 .lock()
@@ -137,22 +134,26 @@ fn download_loop(
                 .find_by_uri(&req.uri)
                 .map_or(false, |e| e.downloaded);
             if !is_downloaded {
-                eprintln!("download: removing stale partial file: {}", output_path.display());
+                eprintln!(
+                    "download: removing stale partial file: {}",
+                    output_path.display()
+                );
                 let _ = std::fs::remove_file(&output_path);
             }
         }
 
-        // Download via yt-dlp with retry
-        let search_query = format!("{} - {}", req.artist_name, req.track_name);
+        let search_query = build_search_query(&req);
         let output_template = output_path.to_string_lossy().to_string();
         let mut success = false;
 
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
-                eprintln!("download: retry {attempt}/{MAX_RETRIES} for {} - {}", req.artist_name, req.track_name);
+                eprintln!(
+                    "download: retry {attempt}/{MAX_RETRIES} for {} - {}",
+                    req.artist_name, req.track_name
+                );
                 std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
 
-                // Re-check favorited status before retry
                 if !favorites.lock().unwrap().is_favorited(&req.uri) {
                     eprintln!("download: skipping retry (unfavorited): {}", req.uri);
                     break;
@@ -199,14 +200,13 @@ fn download_loop(
                         exit_status_label(&output.status),
                         summarize_command_output(&output.stderr)
                     );
-                    // Clean up partial file before retry
                     if output_path.exists() {
                         let _ = std::fs::remove_file(&output_path);
                     }
                 }
                 Err(e) => {
                     eprintln!("download: failed to run yt-dlp: {e}");
-                    break; // Binary missing, no point retrying
+                    break;
                 }
             }
         }
@@ -249,7 +249,6 @@ fn download_loop(
                 );
             }
         } else {
-            // All attempts failed — clean up any partial file
             if output_path.exists() {
                 let _ = std::fs::remove_file(&output_path);
                 eprintln!(
@@ -326,7 +325,6 @@ fn download_cover(url: &str, dest: &Path) -> bool {
         return false;
     }
 
-    // Use the existing cert file path
     let cert_file = crate::resources::find_resource("ca-certificates.crt");
     let cert_arg = cert_file.map(|p| p.to_string_lossy().to_string());
 
@@ -348,7 +346,11 @@ fn download_cover(url: &str, dest: &Path) -> bool {
                 );
                 false
             } else {
-                eprintln!("download: cover fetched url={} dest={}", url, dest.display());
+                eprintln!(
+                    "download: cover fetched url={} dest={}",
+                    url,
+                    dest.display()
+                );
                 true
             }
         }
@@ -362,7 +364,6 @@ fn download_cover(url: &str, dest: &Path) -> bool {
 /// Try to copy cover art from Spotify's local cover cache.
 /// The cache stores original JPEG bytes keyed by FNV hash of the URL.
 fn try_copy_from_cover_cache(url: &str, dest: &Path) -> bool {
-    // Replicate the same FNV hash used in network.rs
     let mut hash = 0xcbf29ce484222325u64;
     for &byte in url.as_bytes() {
         hash ^= byte as u64;
@@ -387,5 +388,26 @@ fn try_copy_from_cover_cache(url: &str, dest: &Path) -> bool {
         }
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_request() -> DownloadRequest {
+        DownloadRequest {
+            uri: "spotify:track:123".to_string(),
+            track_name: "Komm, Susser Tod".to_string(),
+            artist_name: "Arianne".to_string(),
+            cover_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_download_query_uses_artist_dash_track_format() {
+        let request = sample_request();
+
+        assert_eq!(build_search_query(&request), "Arianne - Komm, Susser Tod");
     }
 }

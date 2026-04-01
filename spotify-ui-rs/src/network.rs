@@ -2,7 +2,10 @@ use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
@@ -60,7 +63,9 @@ fn next_status_sync_interval(
         return Some(STATUS_SYNC_BOOST_INTERVAL);
     }
 
-    if duration_ms > 0 && duration_ms.saturating_sub(position_ms) <= STATUS_SYNC_ENDGAME_THRESHOLD_MS {
+    if duration_ms > 0
+        && duration_ms.saturating_sub(position_ms) <= STATUS_SYNC_ENDGAME_THRESHOLD_MS
+    {
         return Some(STATUS_SYNC_ENDGAME_INTERVAL);
     }
 
@@ -145,9 +150,7 @@ fn apply_track_snapshot(
             let current_position = estimated_position_ms(state, now);
             eprintln!(
                 "status sync corrected position {} -> {} ms (threshold {} ms)",
-                current_position,
-                track.position,
-                threshold_ms
+                current_position, track.position, threshold_ms
             );
         }
         state.set_position(track.position, now);
@@ -303,10 +306,7 @@ where
     Some(bytes)
 }
 
-fn load_cached_cover_from(
-    url: &str,
-    cache_root: &Path,
-) -> Option<RgbaImage> {
+fn load_cached_cover_from(url: &str, cache_root: &Path) -> Option<RgbaImage> {
     let bytes = match read_cover_cache(cache_root, url) {
         Some(bytes) => bytes,
         None => return None,
@@ -615,6 +615,8 @@ fn handle_event(
                 st.set_paused(false);
                 st.last_pos_time = Instant::now();
             }
+            drop(st);
+            let _ = cmd_tx.send(crate::mode::InputAction::SpotifyActivated);
         }
 
         "paused" | "not_playing" | "will_pause" => {
@@ -692,7 +694,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, Receiver};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn empty_render_state() -> Arc<Mutex<RenderState>> {
@@ -722,10 +724,18 @@ mod tests {
         tx
     }
 
+    fn test_cmd_channel() -> (
+        mpsc::Sender<crate::mode::InputAction>,
+        Receiver<crate::mode::InputAction>,
+    ) {
+        mpsc::channel()
+    }
+
     fn make_event(event_type: &str, data: Option<&str>) -> WSEvent {
         WSEvent {
             event_type: event_type.to_string(),
-            data: data.map(|json| serde_json::value::RawValue::from_string(json.to_string()).unwrap()),
+            data: data
+                .map(|json| serde_json::value::RawValue::from_string(json.to_string()).unwrap()),
         }
     }
 
@@ -759,7 +769,12 @@ mod tests {
             st.render_dirty = false;
         }
 
-        handle_event(make_event("will_pause", None), &state, &render_state, &cmd_tx);
+        handle_event(
+            make_event("will_pause", None),
+            &state,
+            &render_state,
+            &cmd_tx,
+        );
 
         let st = state.lock().unwrap();
         assert!(st.paused);
@@ -813,6 +828,24 @@ mod tests {
         let st = state.lock().unwrap();
         assert_eq!(st.volume, 75);
         assert!(st.render_dirty);
+    }
+
+    #[test]
+    fn spotify_playing_event_dispatches_takeover() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let render_state = empty_render_state();
+        let (cmd_tx, cmd_rx) = test_cmd_channel();
+        {
+            let mut st = state.lock().unwrap();
+            st.set_mode(crate::mode::AppMode::Local);
+        }
+
+        handle_event(make_event("playing", None), &state, &render_state, &cmd_tx);
+
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(crate::mode::InputAction::SpotifyActivated)
+        );
     }
 
     #[test]
@@ -896,7 +929,11 @@ mod tests {
             );
         }
 
-        assert!(apply_cached_cover_if_present_from(url, &cache_dir, &render_state));
+        assert!(apply_cached_cover_if_present_from(
+            url,
+            &cache_dir,
+            &render_state
+        ));
 
         let rs = render_state.lock().unwrap();
         assert_eq!(rs.applied_cover_url.as_deref(), Some(url));
@@ -907,7 +944,10 @@ mod tests {
 
     #[test]
     fn cover_log_key_uses_stable_short_hash_prefix() {
-        assert_eq!(cover_log_key("https://i.scdn.co/image/cached-cover").len(), 8);
+        assert_eq!(
+            cover_log_key("https://i.scdn.co/image/cached-cover").len(),
+            8
+        );
         assert_eq!(
             cover_log_key("https://i.scdn.co/image/cached-cover"),
             cover_log_key("https://i.scdn.co/image/cached-cover")
@@ -917,11 +957,15 @@ mod tests {
     #[test]
     fn spotify_cover_urls_are_upgraded_to_640_square() {
         assert_eq!(
-            prefer_high_res_cover_url("https://i.scdn.co/image/ab67616d00001e0254b26107b2b819ad77e17311"),
+            prefer_high_res_cover_url(
+                "https://i.scdn.co/image/ab67616d00001e0254b26107b2b819ad77e17311"
+            ),
             "https://i.scdn.co/image/ab67616d0000b27354b26107b2b819ad77e17311"
         );
         assert_eq!(
-            prefer_high_res_cover_url("https://i.scdn.co/image/ab67616d0000485154b26107b2b819ad77e17311"),
+            prefer_high_res_cover_url(
+                "https://i.scdn.co/image/ab67616d0000485154b26107b2b819ad77e17311"
+            ),
             "https://i.scdn.co/image/ab67616d0000b27354b26107b2b819ad77e17311"
         );
     }

@@ -21,11 +21,11 @@ mod render;
 mod resources;
 mod types;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{collections::HashMap};
 
 use app::{AppState, Assets};
 use constants::*;
@@ -101,7 +101,9 @@ fn main() {
     let pending_removals = Arc::new(Mutex::new(HashMap::<String, FavoriteEntry>::new()));
 
     // Initialize favorites and local player
-    let favorites = Arc::new(Mutex::new(FavoritesManager::load(&app_paths().favorites_path)));
+    let favorites = Arc::new(Mutex::new(FavoritesManager::load(
+        &app_paths().favorites_path,
+    )));
     let local_player = Arc::new(Mutex::new(LocalPlayer::new()));
 
     let imported = local_import::scan_once(&favorites);
@@ -252,23 +254,29 @@ fn main() {
     let sig_quit = Arc::clone(&quit);
     let _ = std::thread::Builder::new()
         .name("signal".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if sig_quit.load(Ordering::Relaxed) {
-                    return;
-                }
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if sig_quit.load(Ordering::Relaxed) {
+                return;
             }
         });
 
     // Install signal handlers via libc
     unsafe {
         let quit_for_signal = Arc::clone(&quit);
-        QUIT_FLAG
-            .store(quit_for_signal.as_ref() as *const AtomicBool as usize, Ordering::SeqCst);
+        QUIT_FLAG.store(
+            quit_for_signal.as_ref() as *const AtomicBool as usize,
+            Ordering::SeqCst,
+        );
 
-        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            signal_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            signal_handler as *const () as libc::sighandler_t,
+        );
     }
 
     // Run render loop (blocks until quit)
@@ -429,7 +437,13 @@ fn command_processor(
                     drop(fav);
                     refresh_library_state(&app_state, &render_state, &favorites, &local_player);
 
-                    if !favorites.lock().unwrap().find_by_uri(&uri).map(|entry| entry.downloaded).unwrap_or(false) {
+                    if !favorites
+                        .lock()
+                        .unwrap()
+                        .find_by_uri(&uri)
+                        .map(|entry| entry.downloaded)
+                        .unwrap_or(false)
+                    {
                         // Trigger download only for genuinely new favorites.
                         download_manager.enqueue(DownloadRequest {
                             uri,
@@ -548,8 +562,11 @@ fn command_processor(
 
             InputAction::PlaylistUp => {
                 let mut st = app_state.lock().unwrap();
-                let new_sel =
-                    advance_playlist_selection(st.playlist_selected, st.playlist_count, PlaylistMove::Up);
+                let new_sel = advance_playlist_selection(
+                    st.playlist_selected,
+                    st.playlist_count,
+                    PlaylistMove::Up,
+                );
                 st.set_playlist_selected(new_sel);
             }
 
@@ -666,17 +683,28 @@ fn command_processor(
             }
 
             InputAction::SpotifyActivated => {
-                let mut st = app_state.lock().unwrap();
-                let was_local = st.mode == AppMode::Local;
-                st.set_mode(AppMode::Spotify);
+                let (local_active, remembered_uri) = {
+                    let player = local_player.lock().unwrap();
+                    (
+                        player.is_active(),
+                        player.current_entry().map(|entry| entry.uri.clone()),
+                    )
+                };
 
-                if was_local {
-                    st.local_was_playing = true;
+                let mut st = app_state.lock().unwrap();
+                st.set_mode(AppMode::Spotify);
+                st.set_paused(false);
+
+                if local_active {
+                    st.spotify_preempted_local_uri = remembered_uri.clone();
                     drop(st);
-                    local_player.lock().unwrap().pause();
-                    eprintln!("cmd: Spotify activated, paused local playback");
+                    local_player.lock().unwrap().stop();
+                    eprintln!(
+                        "cmd: Spotify activated, stopped local playback remembered_uri={}",
+                        remembered_uri.as_deref().unwrap_or("none")
+                    );
                 } else {
-                    st.local_was_playing = false;
+                    st.spotify_preempted_local_uri = None;
                 }
             }
 
@@ -689,32 +717,53 @@ fn command_processor(
             }
 
             InputAction::SpotifyDeactivated => {
-                let mut st = app_state.lock().unwrap();
-                if st.local_was_playing {
-                    st.set_mode(AppMode::Local);
-                    st.set_paused(false);
-                    st.local_was_playing = false;
-                    drop(st);
-                    local_player.lock().unwrap().resume();
-                    eprintln!("cmd: Spotify deactivated, resumed local playback");
+                let remembered_uri = app_state
+                    .lock()
+                    .unwrap()
+                    .spotify_preempted_local_uri
+                    .clone();
+                let downloaded = favorites.lock().unwrap().downloaded_entries();
 
-                    let player = local_player.lock().unwrap();
-                    sync_local_track_to_app(&player, &app_state, &favorites);
-                    if let Some(entry) = player.current_entry() {
-                        load_local_cover(entry, &render_state);
-                    }
-                } else if st.mode != AppMode::Local {
+                if let Some(entry) =
+                    select_local_restore_target(&downloaded, remembered_uri.as_deref()).cloned()
+                {
+                    let mut st = app_state.lock().unwrap();
+                    st.set_mode(AppMode::Local);
+                    st.set_paused(true);
+                    st.spotify_preempted_local_uri = None;
+                    st.current_track_uri = entry.uri.clone();
+                    st.track_name = entry.name.clone();
+                    st.artist_name = entry.artist.clone();
+                    st.album_name = entry.album.clone();
+                    st.set_duration(entry.duration_ms.unwrap_or(0));
+                    st.set_position(0, Instant::now());
+                    st.set_favorited(true);
+                    drop(st);
+                    load_local_cover(&entry, &render_state);
+                    eprintln!(
+                        "cmd: Spotify deactivated, restored paused local track {}",
+                        entry.uri
+                    );
+                } else {
+                    let mut st = app_state.lock().unwrap();
                     st.set_mode(AppMode::Waiting);
+                    st.spotify_preempted_local_uri = None;
+                    st.current_track_uri.clear();
+                    st.track_name.clear();
+                    st.artist_name.clear();
+                    st.album_name.clear();
+                    st.set_duration(0);
+                    st.set_position(0, Instant::now());
+                    st.set_favorited(false);
+                    drop(st);
+                    network::update_cover(None, &render_state);
+                    eprintln!("cmd: Spotify deactivated, no local restore target");
                 }
             }
         }
 
         let current_local_uri = current_local_track_uri(&local_player);
-        finalize_pending_removals(
-            &pending_removals,
-            &favorites,
-            current_local_uri.as_deref(),
-        );
+        finalize_pending_removals(&pending_removals, &favorites, current_local_uri.as_deref());
     }
 }
 
@@ -739,6 +788,17 @@ fn advance_playlist_selection(selected: usize, count: usize, movement: PlaylistM
             }
         }
     }
+}
+
+fn select_local_restore_target<'a>(
+    downloaded: &'a [FavoriteEntry],
+    remembered_uri: Option<&str>,
+) -> Option<&'a FavoriteEntry> {
+    let remembered_uri = remembered_uri?;
+    downloaded
+        .iter()
+        .find(|entry| entry.uri == remembered_uri)
+        .or_else(|| downloaded.first())
 }
 
 /// Remove orphaned files from the music directory that are not referenced by any favorite.
@@ -1029,8 +1089,14 @@ mod tests {
 
     #[test]
     fn current_local_track_removal_is_the_only_case_that_defers_file_deletion() {
-        assert!(should_defer_favorite_file_deletion(Some("track:1"), "track:1"));
-        assert!(!should_defer_favorite_file_deletion(Some("track:1"), "track:2"));
+        assert!(should_defer_favorite_file_deletion(
+            Some("track:1"),
+            "track:1"
+        ));
+        assert!(!should_defer_favorite_file_deletion(
+            Some("track:1"),
+            "track:2"
+        ));
         assert!(!should_defer_favorite_file_deletion(None, "track:1"));
     }
 
@@ -1043,10 +1109,12 @@ mod tests {
         let mut ready_while_track_one_is_current =
             pending_removal_uris_ready_for_finalization(&pending, Some("track:1"));
         ready_while_track_one_is_current.sort();
-        assert_eq!(ready_while_track_one_is_current, vec!["track:2".to_string()]);
+        assert_eq!(
+            ready_while_track_one_is_current,
+            vec!["track:2".to_string()]
+        );
 
-        let mut ready_with_no_current =
-            pending_removal_uris_ready_for_finalization(&pending, None);
+        let mut ready_with_no_current = pending_removal_uris_ready_for_finalization(&pending, None);
         ready_with_no_current.sort();
         assert_eq!(
             ready_with_no_current,
@@ -1068,5 +1136,32 @@ mod tests {
     fn playlist_selection_stays_zero_when_list_is_empty() {
         assert_eq!(advance_playlist_selection(0, 0, PlaylistMove::Up), 0);
         assert_eq!(advance_playlist_selection(0, 0, PlaylistMove::Down), 0);
+    }
+
+    #[test]
+    fn local_restore_target_prefers_preempted_uri() {
+        let downloaded = vec![test_entry("track:1"), test_entry("track:2")];
+        let target = select_local_restore_target(&downloaded, Some("track:2"))
+            .map(|entry| entry.uri.clone());
+        assert_eq!(target.as_deref(), Some("track:2"));
+    }
+
+    #[test]
+    fn local_restore_target_falls_back_to_first_downloaded() {
+        let downloaded = vec![test_entry("track:1"), test_entry("track:2")];
+        let target = select_local_restore_target(&downloaded, Some("missing"))
+            .map(|entry| entry.uri.clone());
+        assert_eq!(target.as_deref(), Some("track:1"));
+    }
+
+    #[test]
+    fn local_restore_target_is_none_without_downloads() {
+        assert!(select_local_restore_target(&[], Some("track:1")).is_none());
+    }
+
+    #[test]
+    fn local_restore_target_is_none_without_remembered_uri() {
+        let downloaded = vec![test_entry("track:1")];
+        assert!(select_local_restore_target(&downloaded, None).is_none());
     }
 }
