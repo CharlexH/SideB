@@ -133,6 +133,34 @@ Notes:
 - Press **X** once to show the remove confirmation, then press **X** again to actually remove the track from favorites.
 - If you remove the track that is currently playing locally, SideB keeps the managed file until playback moves away from that track. If you favorite it again before switching tracks, the cached file is preserved.
 
+## Troubleshooting: Downloads Failing
+
+If all downloads fail and the log (`/tmp/sideb.log`) shows `Sign in to confirm you're not a bot`, your YouTube cookies have expired. Fix it in 3 steps:
+
+1. **Install yt-dlp on your computer** (if you don't have it):
+   ```bash
+   # macOS
+   brew install yt-dlp
+   # Windows
+   winget install yt-dlp
+   ```
+
+2. **Export fresh cookies** (make sure you're logged into YouTube in Chrome):
+   ```bash
+   yt-dlp --cookies-from-browser chrome --cookies cookies.txt -s "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+   ```
+
+3. **Copy to the device SD card**, replacing the old file:
+   ```text
+   NextUI   -> /mnt/SDCARD/Tools/tg5040/SideB.pak/data/yt-dlp-cookies.txt
+   Stock    -> /mnt/SDCARD/Apps/SideB/data/yt-dlp-cookies.txt
+   CrossMix -> /mnt/SDCARD/Apps/SideB/data/yt-dlp-cookies.txt
+   ```
+
+Restart SideB and pending downloads will resume automatically.
+
+> **Tip:** Firefox also works — replace `chrome` with `firefox` in step 2.
+
 ## Build 🔧
 
 ### Rust UI (current)
