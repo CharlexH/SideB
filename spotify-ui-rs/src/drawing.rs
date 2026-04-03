@@ -1,13 +1,18 @@
 use crate::constants::*;
 use crate::types::RgbaImage;
 
+/// Fast approximation of `x / 255` using bit shifts.
+/// Accurate to within 1 for all inputs in [0, 65025].
+#[inline(always)]
+fn div255(x: i32) -> i32 {
+    (x + 128 + ((x + 128) >> 8)) >> 8
+}
+
 /// Clear entire buffer to a solid BGRA color.
 pub fn clear_buffer(buf: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
+    let pixel = [b, g, r, a];
     for chunk in buf.chunks_exact_mut(BPP) {
-        chunk[0] = b;
-        chunk[1] = g;
-        chunk[2] = r;
-        chunk[3] = a;
+        chunk.copy_from_slice(&pixel);
     }
 }
 
@@ -36,13 +41,13 @@ pub fn blend_pixel(buf: &mut [u8], x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
     let dg = buf[offset + 1] as i32;
     let db = buf[offset] as i32;
     let da = buf[offset + 3] as i32;
-    let out_a = sa + da * (255 - sa) / 255;
+    let out_a = sa + div255(da * (255 - sa));
     if out_a == 0 {
         return;
     }
-    let out_r = (r as i32 * sa + dr * da * (255 - sa) / 255) / out_a;
-    let out_g = (g as i32 * sa + dg * da * (255 - sa) / 255) / out_a;
-    let out_b = (b as i32 * sa + db * da * (255 - sa) / 255) / out_a;
+    let out_r = (r as i32 * sa + div255(dr * da * (255 - sa))) / out_a;
+    let out_g = (g as i32 * sa + div255(dg * da * (255 - sa))) / out_a;
+    let out_b = (b as i32 * sa + div255(db * da * (255 - sa))) / out_a;
     buf[offset] = out_b as u8;
     buf[offset + 1] = out_g as u8;
     buf[offset + 2] = out_r as u8;
@@ -51,17 +56,20 @@ pub fn blend_pixel(buf: &mut [u8], x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
 
 /// Fill a rectangle with a solid BGRA color.
 pub fn fill_rect(buf: &mut [u8], x: i32, y: i32, w: i32, h: i32, r: u8, g: u8, b: u8, a: u8) {
-    for dy in 0..h {
-        let py = y + dy;
-        if py < 0 || py >= SCREEN_H as i32 {
-            continue;
-        }
-        for dx in 0..w {
-            let px = x + dx;
-            if px < 0 || px >= SCREEN_W as i32 {
-                continue;
-            }
-            set_pixel(buf, px, py, r, g, b, a);
+    let x0 = x.max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let x1 = ((x + w) as usize).min(SCREEN_W);
+    let y1 = ((y + h) as usize).min(SCREEN_H);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let pixel = [b, g, r, a];
+    let row_w = x1 - x0;
+    for py in y0..y1 {
+        let row_off = (py * SCREEN_W + x0) * BPP;
+        let row = &mut buf[row_off..row_off + row_w * BPP];
+        for chunk in row.chunks_exact_mut(BPP) {
+            chunk.copy_from_slice(&pixel);
         }
     }
 }
@@ -81,48 +89,54 @@ pub fn draw_image_alpha(buf: &mut [u8], img: &RgbaImage, x: i32, y: i32) {
         return;
     }
 
-    let src_x0 = (start_x - x) as u32;
-    let src_y0 = (start_y - y) as u32;
+    let src_x0 = (start_x - x) as usize;
+    let src_y0 = (start_y - y) as usize;
     let draw_w = (end_x - start_x) as usize;
     let draw_h = (end_y - start_y) as usize;
+    let img_w = img.width as usize;
 
     for row in 0..draw_h {
-        let sy = src_y0 as usize + row;
+        let sy = src_y0 + row;
         let dy = start_y as usize + row;
-        let src_row_off = (sy * img.width as usize + src_x0 as usize) * 4;
+        let src_row_off = (sy * img_w + src_x0) * 4;
         let dst_row_off = (dy * SCREEN_W + start_x as usize) * BPP;
+        let src_row = &img.pixels[src_row_off..src_row_off + draw_w * 4];
+        let dst_row = &mut buf[dst_row_off..dst_row_off + draw_w * BPP];
 
-        for col in 0..draw_w {
-            let si = src_row_off + col * 4;
-            let sa = img.pixels[si + 3];
+        let mut col = 0;
+        while col < draw_w {
+            let si = col * 4;
+            let sa = src_row[si + 3];
+
             if sa == 0 {
+                // Skip runs of fully transparent pixels
+                col += 1;
+                while col < draw_w && src_row[col * 4 + 3] == 0 {
+                    col += 1;
+                }
                 continue;
             }
 
-            let sr = img.pixels[si] as i32;
-            let sg = img.pixels[si + 1] as i32;
-            let sb = img.pixels[si + 2] as i32;
-            let di = dst_row_off + col * BPP;
-
+            let di = col * BPP;
             if sa == 255 {
-                // Opaque fast path
-                buf[di] = sb as u8;
-                buf[di + 1] = sg as u8;
-                buf[di + 2] = sr as u8;
-                buf[di + 3] = 255;
-                continue;
+                // Opaque: direct copy (RGB→BGR swap)
+                dst_row[di] = src_row[si + 2];
+                dst_row[di + 1] = src_row[si + 1];
+                dst_row[di + 2] = src_row[si];
+                dst_row[di + 3] = 255;
+            } else {
+                // Alpha blend
+                let a = sa as i32;
+                let inv = 255 - a;
+                let sb = src_row[si + 2] as i32;
+                let sg = src_row[si + 1] as i32;
+                let sr = src_row[si] as i32;
+                dst_row[di] = div255(sb * a + dst_row[di] as i32 * inv) as u8;
+                dst_row[di + 1] = div255(sg * a + dst_row[di + 1] as i32 * inv) as u8;
+                dst_row[di + 2] = div255(sr * a + dst_row[di + 2] as i32 * inv) as u8;
+                dst_row[di + 3] = 255;
             }
-
-            // Alpha blend
-            let a = sa as i32;
-            let inv = 255 - a;
-            let db = buf[di] as i32;
-            let dg = buf[di + 1] as i32;
-            let dr = buf[di + 2] as i32;
-            buf[di] = ((sb * a + db * inv) / 255) as u8;
-            buf[di + 1] = ((sg * a + dg * inv) / 255) as u8;
-            buf[di + 2] = ((sr * a + dr * inv) / 255) as u8;
-            buf[di + 3] = 255;
+            col += 1;
         }
     }
 }
@@ -137,20 +151,42 @@ pub fn draw_image_scaled(buf: &mut [u8], img: &RgbaImage, center_x: i32, center_
     let src_w = img.width as i32;
     let src_h = img.height as i32;
 
-    for dy in 0..size {
-        let py = start_y + dy;
-        if py < 0 || py >= SCREEN_H as i32 {
-            continue;
-        }
+    // Clip to screen
+    let clip_y0 = 0.max(-start_y) as i32;
+    let clip_y1 = size.min(SCREEN_H as i32 - start_y);
+    let clip_x0 = 0.max(-start_x) as i32;
+    let clip_x1 = size.min(SCREEN_W as i32 - start_x);
+    if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
+        return;
+    }
+
+    for dy in clip_y0..clip_y1 {
+        let py = (start_y + dy) as usize;
         let src_y = (dy * src_h / size) as u32;
-        for dx in 0..size {
-            let px = start_x + dx;
-            if px < 0 || px >= SCREEN_W as i32 {
-                continue;
-            }
+        let dst_row_off = (py * SCREEN_W + (start_x + clip_x0) as usize) * BPP;
+        let row_pixels = (clip_x1 - clip_x0) as usize;
+        let dst_row = &mut buf[dst_row_off..dst_row_off + row_pixels * BPP];
+
+        for dx in clip_x0..clip_x1 {
             let src_x = (dx * src_w / size) as u32;
             let (r, g, b, a) = img.pixel_at(src_x, src_y);
-            blend_pixel(buf, px, py, r, g, b, a);
+            if a == 0 {
+                continue;
+            }
+            let di = ((dx - clip_x0) as usize) * BPP;
+            if a == 255 {
+                dst_row[di] = b;
+                dst_row[di + 1] = g;
+                dst_row[di + 2] = r;
+                dst_row[di + 3] = 255;
+            } else {
+                let sa = a as i32;
+                let inv = 255 - sa;
+                dst_row[di] = div255(b as i32 * sa + dst_row[di] as i32 * inv) as u8;
+                dst_row[di + 1] = div255(g as i32 * sa + dst_row[di + 1] as i32 * inv) as u8;
+                dst_row[di + 2] = div255(r as i32 * sa + dst_row[di + 2] as i32 * inv) as u8;
+                dst_row[di + 3] = 255;
+            }
         }
     }
 }

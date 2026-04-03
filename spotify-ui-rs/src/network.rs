@@ -1,6 +1,6 @@
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use std::{
     fs,
@@ -222,20 +222,9 @@ fn prefer_high_res_cover_url(url: &str) -> String {
 fn lock_render_state_for_update<'a>(
     render_state: &'a Arc<Mutex<RenderState>>,
 ) -> MutexGuard<'a, RenderState> {
-    let started = Instant::now();
-
-    loop {
-        match render_state.try_lock() {
-            Ok(guard) => {
-                let waited = started.elapsed().as_millis();
-                if waited > 10 {
-                    eprintln!("render-state lock waited {} ms", waited);
-                }
-                return guard;
-            }
-            Err(TryLockError::Poisoned(err)) => return err.into_inner(),
-            Err(TryLockError::WouldBlock) => std::thread::yield_now(),
-        }
+    match render_state.lock() {
+        Ok(guard) => guard,
+        Err(err) => err.into_inner(),
     }
 }
 

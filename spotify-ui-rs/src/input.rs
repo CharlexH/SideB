@@ -13,7 +13,7 @@ use crate::types::InputEvent;
 
 const PLAYLIST_REPEAT_DELAY_MS: u64 = 300;
 const PLAYLIST_REPEAT_INTERVAL_MS: u64 = 120;
-const PLAYLIST_REPEAT_POLL_MS: u64 = 10;
+const PLAYLIST_REPEAT_POLL_MS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaylistRepeatDirection {
