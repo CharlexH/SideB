@@ -123,14 +123,19 @@ fn frame_plan(
     anim_fps: u64,
 ) -> FramePlan {
     let active_frame = Duration::from_nanos(1_000_000_000 / anim_fps);
-    let idle_frame = Duration::from_millis(100);
-
     if connected && !paused {
         return FramePlan {
             should_render: true,
             sleep: active_frame,
         };
     }
+
+    // When paused/idle and nothing to redraw, sleep longer to save CPU
+    let idle_frame = if dirty || full_redraw {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_millis(300)
+    };
 
     FramePlan {
         should_render: dirty || full_redraw,
@@ -625,6 +630,8 @@ pub fn render_loop(
     let mut last_connected = false;
     let mut last_playlist_visible = false;
     let mut animation_mode = AnimationMode::new();
+    let mut last_wheel_frame: usize = usize::MAX; // track last rendered wheel frame
+    let mut last_position: i64 = -1; // track last rendered position for time display
 
     loop {
         if quit.load(Ordering::Relaxed) {
@@ -836,14 +843,29 @@ pub fn render_loop(
 
             if full_redraw || playlist_visible {
                 fb.swap_buffers(back_buf);
+                last_wheel_frame = usize::MAX; // force next partial update
             } else {
-                let dirty_rects: [(usize, usize, usize, usize); 3] = [
-                    (88, 64, 536, 520),
-                    (488, 64, 936, 520),
-                    (0, 620, SCREEN_W, 690),
-                ];
-                for (x1, y1, x2, y2) in dirty_rects {
-                    fb.copy_rect(back_buf, x1, y1, x2, y2);
+                // Compute current wheel frame index to detect actual visual changes
+                let (cur_wheel_frame, cur_position) = {
+                    let st = app_state.lock().unwrap();
+                    let wf_count = render_state.lock().unwrap().wheel_frames.len().max(1);
+                    let idx = crate::image_ops::frame_index_for_angle(st.wheel_angle, wf_count);
+                    (idx, st.position)
+                };
+                // Only write dirty rects if animation or time display actually changed
+                let position_sec = cur_position / 1000;
+                let last_position_sec = last_position / 1000;
+                if cur_wheel_frame != last_wheel_frame || position_sec != last_position_sec || dirty {
+                    let dirty_rects: [(usize, usize, usize, usize); 3] = [
+                        (88, 64, 536, 520),
+                        (488, 64, 936, 520),
+                        (0, 620, SCREEN_W, 690),
+                    ];
+                    for (x1, y1, x2, y2) in dirty_rects {
+                        fb.copy_rect(back_buf, x1, y1, x2, y2);
+                    }
+                    last_wheel_frame = cur_wheel_frame;
+                    last_position = cur_position;
                 }
             }
 
@@ -929,7 +951,7 @@ mod tests {
     fn frame_plan_skips_paused_frames_without_dirty_state() {
         let plan = frame_plan(true, true, false, false, BASE_ANIM_FPS);
         assert!(!plan.should_render);
-        assert_eq!(plan.sleep, Duration::from_millis(100));
+        assert_eq!(plan.sleep, Duration::from_millis(300));
     }
 
     #[test]
