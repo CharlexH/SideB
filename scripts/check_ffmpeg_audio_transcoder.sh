@@ -19,12 +19,22 @@ if "$bin_path" -version >/dev/null 2>&1; then
     exit 1
   fi
 
+  if ! "$bin_path" -encoders 2>/dev/null | grep -q 'pcm_s16le'; then
+    echo "ERROR: $bin_path does not provide the pcm_s16le encoder, which SideB needs for local playback PCM output" >&2
+    exit 1
+  fi
+
   if ! "$bin_path" -muxers 2>/dev/null | grep -q 's16le'; then
     echo "ERROR: $bin_path does not provide the s16le muxer, which SideB needs for local playback PCM output" >&2
     exit 1
   fi
 
-  echo "OK: $bin_path provides libmp3lame and s16le for SideB audio paths"
+  if ! "$bin_path" -h muxer=s16le >/dev/null 2>&1; then
+    echo "ERROR: $bin_path cannot open the s16le muxer, which SideB uses with -f s16le" >&2
+    exit 1
+  fi
+
+  echo "OK: $bin_path provides libmp3lame, pcm_s16le, and s16le for SideB audio paths"
   exit 0
 fi
 
@@ -42,8 +52,13 @@ if ! grep -q 'libmp3lame' "$strings_dump"; then
   exit 1
 fi
 
-if ! grep -Eq -- '--enable-muxer=[^[:space:]]*s16le' "$strings_dump"; then
-  echo "ERROR: $bin_path does not advertise the s16le muxer, which SideB needs for local playback PCM output" >&2
+if ! grep -Eq -- '--enable-encoder=[^[:space:]]*pcm_s16le' "$strings_dump"; then
+  echo "ERROR: $bin_path does not advertise the pcm_s16le encoder, which SideB needs for local playback PCM output" >&2
+  exit 1
+fi
+
+if ! grep -Eq -- '--enable-muxer=[^[:space:]]*pcm_s16le' "$strings_dump"; then
+  echo "ERROR: $bin_path does not advertise the pcm_s16le muxer component, which SideB needs for local playback PCM output" >&2
   exit 1
 fi
 
@@ -52,4 +67,4 @@ if ! grep -Eq 'ffmpeg version|configuration:' "$strings_dump"; then
   exit 1
 fi
 
-echo "OK: $bin_path advertises libmp3lame and s16le for SideB audio paths"
+echo "OK: $bin_path advertises libmp3lame, pcm_s16le, and s16le for SideB audio paths"

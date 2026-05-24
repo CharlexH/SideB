@@ -69,10 +69,17 @@ RUN curl -fsSLo ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSI
       --enable-parser=aac,flac,mpegaudio,opus,vorbis \
       --enable-demuxer=aac,flac,matroska,mov,mp3,ogg,wav \
       --enable-decoder=aac,alac,flac,mp3,opus,pcm_s16le,pcm_s24le,vorbis \
-      --enable-muxer=mp3,mov,mp4,ipod,s16le \
-      --enable-encoder=libmp3lame \
+      --enable-muxer=mp3,mov,mp4,ipod,pcm_s16le \
+      --enable-encoder=libmp3lame,pcm_s16le \
  && make -j"$(nproc)" \
  && make install
+
+RUN "${PREFIX}/bin/ffmpeg" -hide_banner -encoders > /tmp/ffmpeg-encoders.txt 2>/dev/null \
+ && grep -q 'libmp3lame' /tmp/ffmpeg-encoders.txt \
+ && grep -q 'pcm_s16le' /tmp/ffmpeg-encoders.txt \
+ && "${PREFIX}/bin/ffmpeg" -hide_banner -muxers > /tmp/ffmpeg-muxers.txt 2>/dev/null \
+ && grep -q 's16le' /tmp/ffmpeg-muxers.txt \
+ && "${PREFIX}/bin/ffmpeg" -hide_banner -h muxer=s16le >/dev/null 2>&1
 
 RUN mkdir -p /out \
  && cp "${PREFIX}/bin/ffmpeg" /out/ffmpeg-lite \

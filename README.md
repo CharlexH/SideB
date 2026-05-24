@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.10`
+Latest release: `v1.0.11`
 
-- Local MP3 playback now uses the bundled `ffmpeg-lite` decoder on NextUI
-- Playback failures show short on-device notices such as `Missing ffmpeg` or `Missing aplay`
-- The waiting screen now mentions MP3 import alongside Spotify Connect
+- Hotfixes bundled `ffmpeg-lite` so local playback exposes the real `s16le` PCM output path
+- Offline playback no longer auto-skips tracks when MP3 audio starts on NextUI
+- Packaging now verifies the MP3 encoder and local playback PCM muxer before release
 
 ## Screenshots 📸
 
@@ -218,7 +218,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.10`
+Current release tag: `v1.0.11`
 
 ## Repo Layout 🗂️
 

@@ -72,8 +72,8 @@ image_tag=$image_tag
 ffmpeg_version=$ffmpeg_version
 lame_version=$lame_version
 target_triple=$target_triple
-required_encoder=libmp3lame
-required_muxer=s16le
+required_encoder=libmp3lame,pcm_s16le
+required_muxer=pcm_s16le
 EOF
   exit 0
 fi
