@@ -282,6 +282,9 @@ fn dirty_rect_i32(rect: (usize, usize, usize, usize)) -> (i32, i32, i32, i32) {
     (rect.0 as i32, rect.1 as i32, rect.2 as i32, rect.3 as i32)
 }
 
+const FOOTER_NOTICE_DIRTY_RECT: (usize, usize, usize, usize) =
+    (0, (HINTS_BASELINE_Y - 28) as usize, SCREEN_W, SCREEN_H);
+
 fn playback_footer_labels() -> [&'static str; 6] {
     [
         "PREV/NEXT (←/→)",
@@ -297,7 +300,7 @@ fn waiting_status_message(startup_loading: bool) -> &'static str {
     if startup_loading {
         "Loading Tape"
     } else {
-        "Waiting for Spotify..."
+        "Waiting for Spotify or MP3 import"
     }
 }
 
@@ -385,6 +388,33 @@ fn draw_waiting_text(buf: &mut [u8], fonts: &FontSet, startup_loading: bool) {
             fonts.scale_small,
         );
     }
+}
+
+fn draw_footer_notice(buf: &mut [u8], fonts: &FontSet, message: &str) {
+    drawing::fill_rect(
+        buf,
+        FOOTER_NOTICE_DIRTY_RECT.0 as i32,
+        FOOTER_NOTICE_DIRTY_RECT.1 as i32,
+        (FOOTER_NOTICE_DIRTY_RECT.2 - FOOTER_NOTICE_DIRTY_RECT.0) as i32,
+        (FOOTER_NOTICE_DIRTY_RECT.3 - FOOTER_NOTICE_DIRTY_RECT.1) as i32,
+        0,
+        0,
+        0,
+        255,
+    );
+
+    let msg_w = fonts.measure_text(message, fonts.scale_small);
+    let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
+    fonts.draw_text(
+        buf,
+        message,
+        msg_x,
+        HINTS_BASELINE_Y,
+        255,
+        255,
+        255,
+        fonts.scale_small,
+    );
 }
 
 pub fn build_startup_scene(
@@ -662,10 +692,11 @@ pub fn render(
     }
 
     // Dirty rects
-    let dirty_rects: [(i32, i32, i32, i32); 3] = [
+    let dirty_rects: [(i32, i32, i32, i32); 4] = [
         (88, 64, 536, 520),                    // left roll
         (488, 64, 936, 520),                   // right roll
         dirty_rect_i32(STATUS_BAR_DIRTY_RECT), // info bar
+        dirty_rect_i32(FOOTER_NOTICE_DIRTY_RECT),
     ];
 
     if render_state.full_redraw {
@@ -768,7 +799,7 @@ pub fn render_loop(
             let mut st = app_state.lock().unwrap();
             mode = st.mode;
             paused = st.paused;
-            dirty = st.render_dirty || st.confirmation.is_some();
+            dirty = st.render_dirty || st.confirmation.is_some() || st.notice.is_some();
             playlist_visible = st.playlist_visible;
             screen_locked = st.screen_locked;
 
@@ -884,6 +915,10 @@ pub fn render_loop(
                             st.battery_charging,
                         );
                     }
+
+                    if let Some(msg) = st.active_notice_message(std::time::Instant::now()) {
+                        draw_footer_notice(back_buf, fonts, msg);
+                    }
                 }
 
                 // Playlist overlay on waiting screen
@@ -907,7 +942,9 @@ pub fn render_loop(
             {
                 let mut st = app_state.lock().unwrap();
                 let rs = render_state.lock().unwrap();
-                let confirmation_msg = st.active_confirmation_message(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                let confirmation_msg = st.active_confirmation_message(now);
+                let notice_msg = st.active_notice_message(now);
 
                 if let Some(msg) = confirmation_msg {
                     let msg_w = fonts.measure_text(msg, fonts.scale_large);
@@ -1003,6 +1040,10 @@ pub fn render_loop(
                         );
                     }
                 }
+
+                if let Some(msg) = notice_msg {
+                    draw_footer_notice(back_buf, fonts, msg);
+                }
             }
 
             // Playlist overlay on playing screen
@@ -1026,10 +1067,11 @@ pub fn render_loop(
                 let last_position_sec = last_position / 1000;
                 if cur_wheel_frame != last_wheel_frame || position_sec != last_position_sec || dirty
                 {
-                    let dirty_rects: [(usize, usize, usize, usize); 3] = [
+                    let dirty_rects: [(usize, usize, usize, usize); 4] = [
                         (88, 64, 536, 520),
                         (488, 64, 936, 520),
                         STATUS_BAR_DIRTY_RECT,
+                        FOOTER_NOTICE_DIRTY_RECT,
                     ];
                     for (x1, y1, x2, y2) in dirty_rects {
                         fb.copy_rect(back_buf, x1, y1, x2, y2);
@@ -1302,7 +1344,10 @@ mod tests {
     #[test]
     fn waiting_status_message_switches_for_startup_loading() {
         assert_eq!(waiting_status_message(true), "Loading Tape");
-        assert_eq!(waiting_status_message(false), "Waiting for Spotify...");
+        assert_eq!(
+            waiting_status_message(false),
+            "Waiting for Spotify or MP3 import"
+        );
     }
 
     #[test]

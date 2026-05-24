@@ -4,6 +4,7 @@ use crate::mode::AppMode;
 use crate::types::RgbaImage;
 
 const CONFIRM_WINDOW_SECS: u64 = 2;
+const NOTICE_WINDOW_SECS: u64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmationKind {
@@ -14,6 +15,12 @@ pub enum ConfirmationKind {
 #[derive(Debug, Clone)]
 pub struct ConfirmationState {
     pub kind: ConfirmationKind,
+    pub until: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoticeState {
+    pub message: &'static str,
     pub until: Instant,
 }
 
@@ -55,6 +62,7 @@ pub struct AppState {
 
     // -- Confirmations --
     pub confirmation: Option<ConfirmationState>,
+    pub notice: Option<NoticeState>,
 }
 
 impl AppState {
@@ -96,6 +104,7 @@ impl AppState {
             playlist_count: 0,
 
             confirmation: None,
+            notice: None,
         }
     }
 
@@ -150,6 +159,26 @@ impl AppState {
             }) if now < *until => Some("Press X again to remove favorite"),
             Some(_) => {
                 self.confirmation = None;
+                self.render_dirty = true;
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn show_notice(&mut self, message: &'static str, now: Instant) {
+        self.notice = Some(NoticeState {
+            message,
+            until: now + std::time::Duration::from_secs(NOTICE_WINDOW_SECS),
+        });
+        self.render_dirty = true;
+    }
+
+    pub fn active_notice_message(&mut self, now: Instant) -> Option<&'static str> {
+        match self.notice.as_ref() {
+            Some(NoticeState { message, until }) if now < *until => Some(message),
+            Some(_) => {
+                self.notice = None;
                 self.render_dirty = true;
                 None
             }
@@ -298,6 +327,24 @@ mod tests {
             None
         );
         assert!(state.confirmation.is_none());
+    }
+
+    #[test]
+    fn transient_notice_lasts_three_seconds() {
+        let mut state = AppState::new();
+        let now = Instant::now();
+
+        state.show_notice("Missing ffmpeg", now);
+
+        assert_eq!(state.active_notice_message(now), Some("Missing ffmpeg"));
+        assert_eq!(
+            state.active_notice_message(now + std::time::Duration::from_millis(2999)),
+            Some("Missing ffmpeg")
+        );
+        assert_eq!(
+            state.active_notice_message(now + std::time::Duration::from_secs(3)),
+            None
+        );
     }
 
     #[test]

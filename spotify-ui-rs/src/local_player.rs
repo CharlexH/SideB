@@ -1,7 +1,29 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::constants::FFMPEG_TRANSCODER_BIN;
 use crate::favorites::FavoriteEntry;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalPlaybackError {
+    MissingDecoder,
+    MissingAplay,
+    SpawnFailed,
+    MissingAudioPipe,
+    FileMissing,
+    NoPlayableTrack,
+}
+
+impl LocalPlaybackError {
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::MissingDecoder => "Missing ffmpeg",
+            Self::MissingAplay => "Missing aplay",
+            Self::FileMissing => "File missing",
+            Self::MissingAudioPipe | Self::NoPlayableTrack | Self::SpawnFailed => "Playback failed",
+        }
+    }
+}
 
 /// Manages local audio playback via ffmpeg | aplay subprocess pipeline.
 pub struct LocalPlayer {
@@ -30,21 +52,28 @@ impl LocalPlayer {
     }
 
     /// Start shuffled playback of a list of downloaded favorites.
-    pub fn start_shuffled(&mut self, entries: Vec<FavoriteEntry>) {
+    pub fn start_shuffled(
+        &mut self,
+        entries: Vec<FavoriteEntry>,
+    ) -> Result<(), LocalPlaybackError> {
         if entries.is_empty() {
-            return;
+            return Err(LocalPlaybackError::NoPlayableTrack);
         }
         let mut playlist = entries;
         shuffle(&mut playlist);
         self.playlist = playlist;
         self.playlist_index = 0;
-        self.play_current();
+        self.play_current()
     }
 
     /// Start shuffled playback, ensuring the given URI plays first.
-    pub fn start_shuffled_with_first(&mut self, entries: Vec<FavoriteEntry>, first_uri: &str) {
+    pub fn start_shuffled_with_first(
+        &mut self,
+        entries: Vec<FavoriteEntry>,
+        first_uri: &str,
+    ) -> Result<(), LocalPlaybackError> {
         if entries.is_empty() {
-            return;
+            return Err(LocalPlaybackError::NoPlayableTrack);
         }
         let mut playlist = entries;
         shuffle(&mut playlist);
@@ -54,21 +83,22 @@ impl LocalPlayer {
         }
         self.playlist = playlist;
         self.playlist_index = 0;
-        self.play_current();
+        self.play_current()
     }
 
     /// Play the track at the current playlist index.
     /// On failure (missing file, spawn error), skips forward up to playlist.len() times
     /// to find a playable track. Stops if none found.
-    fn play_current(&mut self) {
+    fn play_current(&mut self) -> Result<(), LocalPlaybackError> {
         self.stop_subprocess();
         self.current_entry = None;
 
         if self.playlist.is_empty() {
-            return;
+            return Err(LocalPlaybackError::NoPlayableTrack);
         }
 
         let max_skips = self.playlist.len();
+        let mut last_error = None;
         for skip in 0..max_skips {
             let idx = (self.playlist_index + skip) % self.playlist.len();
             let entry = self.playlist[idx].clone();
@@ -84,6 +114,7 @@ impl LocalPlayer {
                         entry.artist,
                         entry.name
                     );
+                    last_error = Some(LocalPlaybackError::FileMissing);
                     continue;
                 }
             };
@@ -96,6 +127,7 @@ impl LocalPlayer {
                     entry.uri,
                     file_path
                 );
+                last_error = Some(LocalPlaybackError::FileMissing);
                 continue;
             }
 
@@ -133,17 +165,18 @@ impl LocalPlayer {
                             .map(|child| child.id())
                             .unwrap_or_default()
                     );
-                    return;
+                    return Ok(());
                 }
                 Err(e) => {
                     eprintln!(
-                        "local_player: spawn error idx={}/{} uri={} track={} - {} error={e}",
+                        "local_player: spawn error idx={}/{} uri={} track={} - {} error={e:?}",
                         idx + 1,
                         self.playlist.len(),
                         entry.uri,
                         entry.artist,
                         entry.name
                     );
+                    last_error = Some(e);
                     continue;
                 }
             }
@@ -153,10 +186,11 @@ impl LocalPlayer {
             "local_player: no playable track found in playlist size={}",
             self.playlist.len()
         );
+        Err(last_error.unwrap_or(LocalPlaybackError::NoPlayableTrack))
     }
 
     /// Play a specific entry (for playlist selection).
-    pub fn play_entry(&mut self, entry: &FavoriteEntry) {
+    pub fn play_entry(&mut self, entry: &FavoriteEntry) -> Result<(), LocalPlaybackError> {
         // Find in playlist or add it
         if let Some(idx) = self.playlist.iter().position(|e| e.uri == entry.uri) {
             self.playlist_index = idx;
@@ -164,7 +198,7 @@ impl LocalPlayer {
             self.playlist.push(entry.clone());
             self.playlist_index = self.playlist.len() - 1;
         }
-        self.play_current();
+        self.play_current()
     }
 
     pub fn pause(&mut self) {
@@ -243,24 +277,24 @@ impl LocalPlayer {
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn next(&mut self) -> Result<(), LocalPlaybackError> {
         if self.playlist.is_empty() {
-            return;
+            return Err(LocalPlaybackError::NoPlayableTrack);
         }
         self.playlist_index = (self.playlist_index + 1) % self.playlist.len();
-        self.play_current();
+        self.play_current()
     }
 
-    pub fn prev(&mut self) {
+    pub fn prev(&mut self) -> Result<(), LocalPlaybackError> {
         if self.playlist.is_empty() {
-            return;
+            return Err(LocalPlaybackError::NoPlayableTrack);
         }
         if self.playlist_index == 0 {
             self.playlist_index = self.playlist.len() - 1;
         } else {
             self.playlist_index -= 1;
         }
-        self.play_current();
+        self.play_current()
     }
 
     /// Check if the current track has finished playing.
@@ -288,8 +322,7 @@ impl LocalPlayer {
                 "local_player: track finished track={} advancing",
                 current_track_label(self.current_entry.as_ref())
             );
-            self.next();
-            return true;
+            return self.next().is_ok();
         }
         false
     }
@@ -349,10 +382,26 @@ impl Drop for LocalPlayer {
     }
 }
 
+fn local_playback_decoder_bin() -> &'static str {
+    FFMPEG_TRANSCODER_BIN
+}
+
+fn playback_spawn_error(component: &str, kind: std::io::ErrorKind) -> LocalPlaybackError {
+    match (component, kind) {
+        ("ffmpeg", std::io::ErrorKind::NotFound) => LocalPlaybackError::MissingDecoder,
+        ("aplay", std::io::ErrorKind::NotFound) => LocalPlaybackError::MissingAplay,
+        _ => LocalPlaybackError::SpawnFailed,
+    }
+}
+
 /// Spawn the ffmpeg → aplay pipeline for a given audio file.
-fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), String> {
-    eprintln!("local_player: launching ffmpeg -> aplay for {}", file_path);
-    let mut ffmpeg = Command::new("ffmpeg")
+fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), LocalPlaybackError> {
+    let decoder = local_playback_decoder_bin();
+    eprintln!(
+        "local_player: launching {} -> aplay for {}",
+        decoder, file_path
+    );
+    let mut ffmpeg = Command::new(decoder)
         .args([
             "-i",
             file_path,
@@ -370,13 +419,16 @@ fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), String> {
         .stderr(Stdio::null())
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+        .map_err(|e| {
+            eprintln!("local_player: ffmpeg spawn failed: {e}");
+            playback_spawn_error("ffmpeg", e.kind())
+        })?;
     eprintln!("local_player: ffmpeg started pid={}", ffmpeg.id());
 
     let ffmpeg_stdout = ffmpeg
         .stdout
         .take()
-        .ok_or_else(|| "ffmpeg stdout pipe missing".to_string())?;
+        .ok_or(LocalPlaybackError::MissingAudioPipe)?;
 
     let aplay = match Command::new("aplay")
         .args(["-f", "S16_LE", "-r", "44100", "-c", "2", "-q"])
@@ -389,7 +441,8 @@ fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), String> {
         Err(e) => {
             let _ = ffmpeg.kill();
             let _ = ffmpeg.wait();
-            return Err(format!("aplay spawn failed: {e}"));
+            eprintln!("local_player: aplay spawn failed: {e}");
+            return Err(playback_spawn_error("aplay", e.kind()));
         }
     };
     eprintln!("local_player: aplay started pid={}", aplay.id());
@@ -429,5 +482,28 @@ fn shuffle<T>(slice: &mut [T]) {
         rng ^= rng << 17;
         let j = (rng as usize) % (i + 1);
         slice.swap(i, j);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::FFMPEG_TRANSCODER_BIN;
+
+    #[test]
+    fn local_playback_decoder_defaults_to_bundled_ffmpeg_lite() {
+        assert_eq!(local_playback_decoder_bin(), FFMPEG_TRANSCODER_BIN);
+    }
+
+    #[test]
+    fn missing_decoder_error_uses_short_user_notice() {
+        let err = playback_spawn_error("ffmpeg", std::io::ErrorKind::NotFound);
+        assert_eq!(err.notice(), "Missing ffmpeg");
+    }
+
+    #[test]
+    fn missing_aplay_error_uses_short_user_notice() {
+        let err = playback_spawn_error("aplay", std::io::ErrorKind::NotFound);
+        assert_eq!(err.notice(), "Missing aplay");
     }
 }

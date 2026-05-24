@@ -19,7 +19,12 @@ if "$bin_path" -version >/dev/null 2>&1; then
     exit 1
   fi
 
-  echo "OK: $bin_path provides libmp3lame for SideB download transcoding"
+  if ! "$bin_path" -muxers 2>/dev/null | grep -q 's16le'; then
+    echo "ERROR: $bin_path does not provide the s16le muxer, which SideB needs for local playback PCM output" >&2
+    exit 1
+  fi
+
+  echo "OK: $bin_path provides libmp3lame and s16le for SideB audio paths"
   exit 0
 fi
 
@@ -37,9 +42,14 @@ if ! grep -q 'libmp3lame' "$strings_dump"; then
   exit 1
 fi
 
+if ! grep -Eq -- '--enable-muxer=[^[:space:]]*s16le' "$strings_dump"; then
+  echo "ERROR: $bin_path does not advertise the s16le muxer, which SideB needs for local playback PCM output" >&2
+  exit 1
+fi
+
 if ! grep -Eq 'ffmpeg version|configuration:' "$strings_dump"; then
   echo "ERROR: $bin_path does not look like an FFmpeg-compatible binary" >&2
   exit 1
 fi
 
-echo "OK: $bin_path advertises libmp3lame for SideB download transcoding"
+echo "OK: $bin_path advertises libmp3lame and s16le for SideB audio paths"

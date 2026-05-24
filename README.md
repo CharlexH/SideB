@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.9`
+Latest release: `v1.0.10`
 
-- Local MP3 import now scans subfolders under `data/imports/`
-- Nested album folders are imported into `FAV LIST` automatically
-- Existing import collision handling still preserves duplicate filenames safely
+- Local MP3 playback now uses the bundled `ffmpeg-lite` decoder on NextUI
+- Playback failures show short on-device notices such as `Missing ffmpeg` or `Missing aplay`
+- The waiting screen now mentions MP3 import alongside Spotify Connect
 
 ## Screenshots 📸
 
@@ -62,7 +62,7 @@ The app consists of two components:
 
 ### Offline playback pipeline
 
-When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is played back through the device's built-in `ffmpeg → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
+When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is played back through the bundled `ffmpeg-lite → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
 
 For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art with the device's system ffmpeg when available, and adds the track to `FAV LIST` as a managed local item.
 
@@ -164,7 +164,7 @@ cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
 ### Required runtime files (not tracked in git)
 
 - `package/SideB.pak/go-librespot` — Spotify Connect backend binary
-- `package/SideB.pak/ffmpeg-lite` — bundled FFmpeg-compatible audio transcoder with MP3 encoder support; a minimal audio-focused build is sufficient
+- `package/SideB.pak/ffmpeg-lite` — bundled FFmpeg-compatible audio transcoder with MP3 encoding and local playback PCM output support; keep it minimal and audio-focused
 - `package/SideB.pak/yt-dlp` — YouTube audio downloader (aarch64 binary)
 - `package/SideB.pak/resources/ca-certificates.crt` — TLS root certificates
 
@@ -218,7 +218,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.9`
+Current release tag: `v1.0.10`
 
 ## Repo Layout 🗂️
 

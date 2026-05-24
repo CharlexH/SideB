@@ -1,12 +1,13 @@
 {
   "name": "SideB",
-  "version": "v1.0.9",
+  "version": "v1.0.10",
   "type": "TOOL",
   "description": "Retro cassette-style player for TrimUI Brick with Spotify Connect, offline favorites, local MP3 playback, smart caching, and download progress",
   "author": "CharlexH",
   "repo_url": "https://github.com/CharlexH/SideB",
-  "release_filename": "SideB-1.0.9-nextui.zip",
+  "release_filename": "SideB-1.0.10-nextui.zip",
   "changelog": {
+    "v1.0.10": "Fixed local MP3 playback on NextUI by using the bundled ffmpeg-lite decoder and showing short on-device playback error notices.",
     "v1.0.9": "Local MP3 import now scans nested folders under data/imports, so album subfolders are added to FAV LIST automatically.",
     "v1.0.8": "Added a status-bar battery indicator and SideB Lock screen-off behavior, with safer playback-aware sleep handling.",
     "v1.0.7": "Fixed NextUI Pak Store install layout so SideB launches from the menu after store installation.",

@@ -36,7 +36,7 @@ use download::{DownloadManager, DownloadRequest};
 use favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
 use font::FontSet;
 use framebuffer::Framebuffer;
-use local_player::LocalPlayer;
+use local_player::{LocalPlaybackError, LocalPlayer};
 use mode::{AppMode, InputAction};
 use paths::{app_paths, detect_paths, init_paths};
 use render::RenderState;
@@ -596,15 +596,24 @@ fn command_processor(
                     let current_uri = app_state.lock().unwrap().current_track_uri.clone();
                     let downloaded = favorites.lock().unwrap().downloaded_entries();
                     if !downloaded.is_empty() {
-                        player.start_shuffled_with_first(downloaded, &current_uri);
-                        sync_local_track_to_app(&player, &app_state, &favorites);
-                        let mut st = app_state.lock().unwrap();
-                        st.set_mode(AppMode::Local);
-                        st.set_paused(false);
-                        drop(st);
-                        if let Some(entry) = player.current_entry() {
-                            load_local_cover(entry, &render_state);
+                        match player.start_shuffled_with_first(downloaded, &current_uri) {
+                            Ok(()) => {
+                                sync_local_track_to_app(&player, &app_state, &favorites);
+                                let mut st = app_state.lock().unwrap();
+                                st.set_mode(AppMode::Local);
+                                st.set_paused(false);
+                                drop(st);
+                                if let Some(entry) = player.current_entry() {
+                                    load_local_cover(entry, &render_state);
+                                }
+                            }
+                            Err(error) => {
+                                drop(player);
+                                show_playback_notice(&app_state, error);
+                            }
                         }
+                    } else {
+                        show_user_notice(&app_state, "No local tracks");
                     }
                 }
             }
@@ -614,12 +623,19 @@ fn command_processor(
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
                 let mut player = local_player.lock().unwrap();
                 player.refresh_playlist(downloaded);
-                player.next();
-                sync_local_track_to_app(&player, &app_state, &favorites);
-                let entry = player.current_entry().cloned();
-                drop(player);
-                if let Some(entry) = entry {
-                    load_local_cover(&entry, &render_state);
+                match player.next() {
+                    Ok(()) => {
+                        sync_local_track_to_app(&player, &app_state, &favorites);
+                        let entry = player.current_entry().cloned();
+                        drop(player);
+                        if let Some(entry) = entry {
+                            load_local_cover(&entry, &render_state);
+                        }
+                    }
+                    Err(error) => {
+                        drop(player);
+                        show_playback_notice(&app_state, error);
+                    }
                 }
             }
 
@@ -628,12 +644,19 @@ fn command_processor(
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
                 let mut player = local_player.lock().unwrap();
                 player.refresh_playlist(downloaded);
-                player.prev();
-                sync_local_track_to_app(&player, &app_state, &favorites);
-                let entry = player.current_entry().cloned();
-                drop(player);
-                if let Some(entry) = entry {
-                    load_local_cover(&entry, &render_state);
+                match player.prev() {
+                    Ok(()) => {
+                        sync_local_track_to_app(&player, &app_state, &favorites);
+                        let entry = player.current_entry().cloned();
+                        drop(player);
+                        if let Some(entry) = entry {
+                            load_local_cover(&entry, &render_state);
+                        }
+                    }
+                    Err(error) => {
+                        drop(player);
+                        show_playback_notice(&app_state, error);
+                    }
                 }
             }
 
@@ -654,20 +677,28 @@ fn command_processor(
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
                 if downloaded.is_empty() {
                     eprintln!("cmd: no downloaded tracks for local playback");
+                    show_user_notice(&app_state, "No local tracks");
                     continue;
                 }
 
                 let mut player = local_player.lock().unwrap();
-                player.start_shuffled(downloaded);
-                sync_local_track_to_app(&player, &app_state, &favorites);
+                match player.start_shuffled(downloaded) {
+                    Ok(()) => {
+                        sync_local_track_to_app(&player, &app_state, &favorites);
 
-                let mut st = app_state.lock().unwrap();
-                st.set_mode(AppMode::Local);
-                st.set_paused(false);
+                        let mut st = app_state.lock().unwrap();
+                        st.set_mode(AppMode::Local);
+                        st.set_paused(false);
 
-                // Load cover for first track
-                if let Some(entry) = player.current_entry() {
-                    load_local_cover(entry, &render_state);
+                        // Load cover for first track
+                        if let Some(entry) = player.current_entry() {
+                            load_local_cover(entry, &render_state);
+                        }
+                    }
+                    Err(error) => {
+                        drop(player);
+                        show_playback_notice(&app_state, error);
+                    }
                 }
             }
 
@@ -740,26 +771,37 @@ fn command_processor(
                         let mut player = local_player.lock().unwrap();
                         // Build a playlist from all downloaded entries
                         let downloaded = favorites.lock().unwrap().downloaded_entries();
-                        if player.is_active() {
+                        let playback_result = if player.is_active() {
                             // Just switch to selected track
-                            player.play_entry(&entry);
+                            player.play_entry(&entry)
                         } else {
-                            // Start fresh with all downloaded, then jump to selected
-                            player.start_shuffled(downloaded);
-                            player.play_entry(&entry);
+                            // Start fresh with all downloaded and place the selected track first.
+                            player.start_shuffled_with_first(downloaded, &entry.uri)
+                        };
+
+                        match playback_result {
+                            Ok(()) => {
+                                sync_local_track_to_app(&player, &app_state, &favorites);
+
+                                let mut st = app_state.lock().unwrap();
+                                st.set_mode(AppMode::Local);
+                                st.set_paused(false);
+                                st.set_playlist_visible(false);
+
+                                drop(st);
+                                drop(player);
+
+                                // Load cover
+                                load_local_cover(&entry, &render_state);
+                            }
+                            Err(error) => {
+                                drop(player);
+                                let mut st = app_state.lock().unwrap();
+                                st.set_playlist_visible(false);
+                                drop(st);
+                                show_playback_notice(&app_state, error);
+                            }
                         }
-                        sync_local_track_to_app(&player, &app_state, &favorites);
-
-                        let mut st = app_state.lock().unwrap();
-                        st.set_mode(AppMode::Local);
-                        st.set_paused(false);
-                        st.set_playlist_visible(false);
-
-                        drop(st);
-                        drop(player);
-
-                        // Load cover
-                        load_local_cover(&entry, &render_state);
                     }
                 }
             }
@@ -937,6 +979,17 @@ fn command_processor(
         let current_local_uri = current_local_track_uri(&local_player);
         finalize_pending_removals(&pending_removals, &favorites, current_local_uri.as_deref());
     }
+}
+
+fn show_user_notice(app_state: &Arc<Mutex<AppState>>, message: &'static str) {
+    app_state
+        .lock()
+        .unwrap()
+        .show_notice(message, Instant::now());
+}
+
+fn show_playback_notice(app_state: &Arc<Mutex<AppState>>, error: LocalPlaybackError) {
+    show_user_notice(app_state, error.notice());
 }
 
 fn advance_playlist_selection(selected: usize, count: usize, movement: PlaylistMove) -> usize {
