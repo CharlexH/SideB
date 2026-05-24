@@ -131,6 +131,10 @@ fn main() {
     if imported > 0 {
         eprintln!("import: startup imported {imported} local track(s)");
     }
+    let cover_updates = local_import::sync_existing_music_covers(&favorites);
+    if cover_updates > 0 {
+        eprintln!("import: startup linked {cover_updates} existing cover file(s)");
+    }
 
     // Clean up orphaned files in music directory
     cleanup_orphaned_files(&favorites);
@@ -1162,7 +1166,11 @@ fn refresh_library_state(
         }
 
         let current_uri = st.current_track_uri.clone();
-        let current_still_downloaded = downloaded.iter().any(|entry| entry.uri == current_uri);
+        let current_entry = downloaded
+            .iter()
+            .find(|entry| entry.uri == current_uri)
+            .cloned();
+        let current_still_downloaded = current_entry.is_some();
 
         if !player_active && st.mode != AppMode::Spotify {
             if let Some(entry) = downloaded.first() {
@@ -1177,6 +1185,8 @@ fn refresh_library_state(
                     st.set_position(0, Instant::now());
                     st.set_favorited(true);
                     seed_entry = Some(entry.clone());
+                } else if st.mode == AppMode::Local {
+                    seed_entry = current_entry;
                 }
             } else {
                 st.set_mode(AppMode::Waiting);

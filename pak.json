@@ -1,12 +1,13 @@
 {
   "name": "SideB",
-  "version": "v1.0.11",
+  "version": "v1.0.12",
   "type": "TOOL",
   "description": "Retro cassette-style player for TrimUI Brick with Spotify Connect, offline favorites, local MP3 playback, smart caching, and download progress",
   "author": "CharlexH",
   "repo_url": "https://github.com/CharlexH/SideB",
-  "release_filename": "SideB-1.0.11-nextui.zip",
+  "release_filename": "SideB-1.0.12-nextui.zip",
   "changelog": {
+    "v1.0.12": "Local cover art can now be added to already-imported tracks by placing a same-name image next to the MP3 in data/music.",
     "v1.0.11": "Hotfixes the bundled ffmpeg-lite build so local playback exposes the real s16le PCM output path and no longer auto-skips tracks.",
     "v1.0.10": "Fixed local MP3 playback on NextUI by using the bundled ffmpeg-lite decoder and showing short on-device playback error notices.",
     "v1.0.9": "Local MP3 import now scans nested folders under data/imports, so album subfolders are added to FAV LIST automatically.",

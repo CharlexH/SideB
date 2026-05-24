@@ -85,6 +85,44 @@ pub fn scan_once(favorites: &Arc<Mutex<FavoritesManager>>) -> usize {
     imported
 }
 
+pub fn sync_existing_music_covers(favorites: &Arc<Mutex<FavoritesManager>>) -> usize {
+    let entries = {
+        let fav = favorites.lock().unwrap();
+        fav.downloaded_entries()
+    };
+
+    let mut updated = 0usize;
+    for entry in entries {
+        let needs_cover = match entry.cover_path.as_deref() {
+            Some(path) => !Path::new(path).exists(),
+            None => true,
+        };
+        if !needs_cover {
+            continue;
+        }
+
+        let Some(file_path) = entry.file_path.as_deref() else {
+            continue;
+        };
+        let Some(cover_path) = find_sidecar_cover(Path::new(file_path)) else {
+            continue;
+        };
+
+        eprintln!(
+            "import: linked existing sidecar cover {} -> {}",
+            cover_path.display(),
+            entry.uri
+        );
+        favorites
+            .lock()
+            .unwrap()
+            .set_cover_path(&entry.uri, &cover_path.to_string_lossy());
+        updated += 1;
+    }
+
+    updated
+}
+
 fn collect_import_candidates(imports_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     collect_import_candidates_into(imports_dir, &mut candidates);
@@ -134,8 +172,14 @@ pub fn run(
     let _ = fs::create_dir_all(&app_paths().imports_dir);
     while !quit.load(Ordering::Relaxed) {
         let imported = scan_once(&favorites);
+        let cover_updates = sync_existing_music_covers(&favorites);
         if imported > 0 {
             eprintln!("import: added {imported} local track(s)");
+        }
+        if cover_updates > 0 {
+            eprintln!("import: linked {cover_updates} existing cover file(s)");
+        }
+        if imported > 0 || cover_updates > 0 {
             let _ = cmd_tx.send(InputAction::LibraryChanged);
         }
 
@@ -370,10 +414,28 @@ fn unique_target_path(dir: &Path, base_name: &str, ext: &str) -> PathBuf {
 fn find_sidecar_cover(import_mp3: &Path) -> Option<PathBuf> {
     let stem = import_mp3.file_stem()?.to_str()?;
     let parent = import_mp3.parent()?;
-    for ext in ["jpg", "jpeg", "png"] {
-        let candidate = parent.join(format!("{stem}.{ext}"));
-        if candidate.exists() {
-            return Some(candidate);
+    let mut entries = fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    for preferred_ext in ["jpg", "jpeg", "png"] {
+        for candidate in &entries {
+            if !candidate.is_file() {
+                continue;
+            }
+            let Some(candidate_stem) = candidate.file_stem().and_then(|value| value.to_str())
+            else {
+                continue;
+            };
+            let Some(candidate_ext) = candidate.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if candidate_stem == stem && candidate_ext.eq_ignore_ascii_case(preferred_ext) {
+                return Some(candidate.clone());
+            }
         }
     }
     None
@@ -492,6 +554,71 @@ mod tests {
             relative,
             vec!["Disc 1/Nested.mp3", "Disc 2/Deep/Upper.MP3", "Root.mp3"]
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sidecar_cover_match_is_case_insensitive() {
+        let base = std::env::temp_dir().join(format!(
+            "sideb-cover-case-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let mp3 = base.join("Artist - Song.mp3");
+        let cover = base.join("Artist - Song.JPG");
+        fs::write(&mp3, b"mp3").unwrap();
+        fs::write(&cover, b"jpg").unwrap();
+
+        assert_eq!(find_sidecar_cover(&mp3), Some(cover));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sync_existing_music_covers_links_same_name_cover_in_music_dir() {
+        let base = std::env::temp_dir().join(format!(
+            "sideb-cover-sync-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let music_dir = base.join("music");
+        fs::create_dir_all(&music_dir).unwrap();
+        let mp3 = music_dir.join("Artist - Song.mp3");
+        let cover = music_dir.join("Artist - Song.jpg");
+        fs::write(&mp3, b"mp3").unwrap();
+        fs::write(&cover, b"jpg").unwrap();
+
+        let favorites = Arc::new(Mutex::new(FavoritesManager::load(
+            base.join("favorites.json"),
+        )));
+        favorites.lock().unwrap().add(FavoriteEntry {
+            uri: "local:Artist - Song.mp3".to_string(),
+            name: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: String::new(),
+            cover_url: String::new(),
+            source: FavoriteSource::LocalImport,
+            file_path: Some(mp3.to_string_lossy().to_string()),
+            cover_path: None,
+            duration_ms: None,
+            spotify_duration_ms: None,
+            downloaded: true,
+            added_at: "0".to_string(),
+        });
+
+        assert_eq!(sync_existing_music_covers(&favorites), 1);
+        let linked_cover = favorites
+            .lock()
+            .unwrap()
+            .find_by_uri("local:Artist - Song.mp3")
+            .and_then(|entry| entry.cover_path.clone());
+        assert_eq!(linked_cover, Some(cover.to_string_lossy().to_string()));
 
         let _ = fs::remove_dir_all(&base);
     }

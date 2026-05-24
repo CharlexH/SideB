@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.11`
+Latest release: `v1.0.12`
 
-- Hotfixes bundled `ffmpeg-lite` so local playback exposes the real `s16le` PCM output path
-- Offline playback no longer auto-skips tracks when MP3 audio starts on NextUI
-- Packaging now verifies the MP3 encoder and local playback PCM muxer before release
+- Local cover art can now be added to already-imported tracks by placing a same-name image next to the MP3 in `data/music/`
+- Same-name cover sidecars now match `.jpg`, `.jpeg`, and `.png` case-insensitively
+- New manual uploads still use `data/imports/` so SideB can create the managed library entry
 
 ## Screenshots 📸
 
@@ -125,6 +125,28 @@ CrossMix -> /mnt/SDCARD/Apps/SideB/data/imports/
 
 SideB scans that folder recursively at startup and while running. Imported files are moved into `data/music/`, then added to `FAV LIST` and treated like downloaded local tracks.
 
+#### Cover art for local uploads
+
+For best results, embed cover art in the MP3 before copying it into `data/imports/`. SideB uses embedded cover art first.
+
+If the MP3 has no embedded cover, place a same-name `.jpg`, `.jpeg`, or `.png` image next to the MP3 in `data/imports/`, or in the same import subfolder:
+
+```text
+data/imports/My Album/
+  Artist - Song.mp3
+  Artist - Song.jpg
+```
+
+If a track was already imported without cover art, place the same-name image next to the managed MP3 in `data/music/`:
+
+```text
+data/music/
+  Artist - Song.mp3
+  Artist - Song.jpg
+```
+
+SideB scans for these existing-library covers at startup and while running. Folder-level names such as `cover.jpg` or `folder.jpg` are not matched automatically; the image filename needs to match the MP3 filename stem.
+
 Notes:
 
 - Current manual import support is `MP3` only.
@@ -218,7 +240,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.11`
+Current release tag: `v1.0.12`
 
 ## Repo Layout 🗂️
 
