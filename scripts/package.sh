@@ -2,12 +2,14 @@
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd)
-target_triple="aarch64-unknown-linux-musl"
+target_triple="aarch64-unknown-linux-gnu"
+target_glibc="2.33"
 binary_path="$repo_root/spotify-ui-rs/target/$target_triple/release/sideb"
 package_source="$repo_root/package/SideB.pak"
 dist_root="$repo_root/dist"
 stage_root="$dist_root/stage"
 ffmpeg_check_script="$repo_root/scripts/check_ffmpeg_audio_transcoder.sh"
+release_metadata_check_script="$repo_root/scripts/check_release_metadata.sh"
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo_root/spotify-ui-rs/Cargo.toml" | head -n 1)
 if [ -z "$version" ]; then
@@ -159,14 +161,17 @@ validate_zip_layout() {
   assert_zip_entry "$zip_path" "${root}resources/bat75.png"
   assert_zip_entry "$zip_path" "${root}resources/bat100.png"
   assert_zip_entry "$zip_path" "${root}resources/bat_charging.png"
+  assert_zip_entry "$zip_path" "${root}resources/ca-certificates.crt"
+  assert_zip_entry "$zip_path" "${root}icon.png"
   assert_zip_entry "$zip_path" "${root}LICENSES/NOTICE.md"
   assert_zip_entry "$zip_path" "${root}LICENSES/THIRD_PARTY_SOURCES.md"
   assert_zip_no_entry "$zip_path" "${root}resources/Fullscreen - Mesh Grid.png"
 }
 
 validate_release_packages() {
+  local expected_asset_count
   local pak_release_filename
-  pak_release_filename=$(sed -n 's/^  "release_filename": "\(.*\)",$/\1/p' "$repo_root/pak.json" | head -n 1)
+  pak_release_filename=$(sed -n 's/^[[:space:]]*"release_filename":[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_root/pak.json" | head -n 1)
 
   if [ "$pak_release_filename" != "SideB-${version}-nextui.zip" ]; then
     echo "ERROR: pak.json release_filename ($pak_release_filename) does not match SideB-${version}-nextui.zip" >&2
@@ -189,27 +194,38 @@ validate_release_packages() {
   assert_zip_no_entry "$dist_root/SideB-${version}-crossmix.zip" "launch.sh"
   assert_zip_entry "$dist_root/SideB-${version}-crossmix.zip" "Apps/SideB/config.json"
 
+  expected_asset_count=$(find "$dist_root" -maxdepth 1 -type f -name "SideB-${version}-*.zip" | wc -l | tr -d ' ')
+  if [ "$expected_asset_count" != "3" ]; then
+    echo "ERROR: expected exactly 3 release zips for $version, found $expected_asset_count" >&2
+    find "$dist_root" -maxdepth 1 -type f -name "SideB-${version}-*.zip" -print >&2
+    exit 1
+  fi
+
   echo "OK: release zip layouts match pak store and manual install expectations"
 }
 
 require_command zip
 require_command zipinfo
+require_command zig
+require_command cargo-zigbuild
 require_file "$package_source/go-librespot"
 require_file "$package_source/yt-dlp"
 require_file "$package_source/ffmpeg-lite"
 require_file "$ffmpeg_check_script"
+require_file "$release_metadata_check_script"
 require_file "$package_source/data/config.yml"
 require_file "$repo_root/packaging/shared/LICENSES/NOTICE.md"
 require_file "$repo_root/packaging/shared/LICENSES/THIRD_PARTY_SOURCES.md"
 
 "$ffmpeg_check_script" "$package_source/ffmpeg-lite"
+"$release_metadata_check_script" "$repo_root"
 
 mkdir -p "$dist_root"
 
-echo "Building sideb $version for $target_triple"
+echo "Building sideb $version for $target_triple glibc $target_glibc"
 (
   cd "$repo_root/spotify-ui-rs"
-  cargo build --release --target "$target_triple"
+  cargo zigbuild --release --target "$target_triple.$target_glibc"
 )
 require_file "$binary_path"
 

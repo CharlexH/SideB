@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
 use crate::constants::{FFMPEG_TRANSCODER_BIN, NODE_BIN, YTDLP_BIN};
@@ -16,6 +19,7 @@ const RETRY_DELAY_SECS: u64 = 3;
 const CANDIDATE_COUNT: usize = 5;
 const DURATION_REJECT_THRESHOLD_MS: i64 = 15_000;
 const PROGRESS_THROTTLE_MS: u128 = 400;
+const MAX_CAPTURED_STDERR_BYTES: usize = 16 * 1024;
 
 /// Download phase visible to the UI.
 /// Overall progress: Queued=0%, Searching=0-25%, Downloading=25-75%, Transcoding=75-100%.
@@ -47,13 +51,60 @@ impl DownloadPhase {
 pub type DownloadProgressMap = Arc<Mutex<HashMap<String, DownloadPhase>>>;
 
 /// A request to download a track in the background.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub uri: String,
     pub track_name: String,
     pub artist_name: String,
     pub cover_url: String,
     pub spotify_duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadFailureKind {
+    CookiesBotCheck,
+    SignatureChallenge,
+    Network,
+    TempStorage,
+    MissingYtDlp,
+    MissingTranscoder,
+    NoMatchingAudio,
+    Generic,
+}
+
+impl DownloadFailureKind {
+    fn notice(self) -> &'static str {
+        match self {
+            Self::CookiesBotCheck => "Cookie check failed",
+            Self::SignatureChallenge => "YouTube challenge",
+            Self::Network => "Network error",
+            Self::TempStorage => "Storage full",
+            Self::MissingYtDlp => "Missing yt-dlp",
+            Self::MissingTranscoder => "Audio tool failed",
+            Self::NoMatchingAudio => "No audio match",
+            Self::Generic => "Download failed",
+        }
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            Self::Generic => 0,
+            Self::NoMatchingAudio => 1,
+            Self::Network => 2,
+            Self::CookiesBotCheck => 3,
+            Self::SignatureChallenge => 4,
+            Self::TempStorage => 5,
+            Self::MissingTranscoder => 6,
+            Self::MissingYtDlp => 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadOutcome {
+    Success,
+    Skipped,
+    Failed(DownloadFailureKind),
 }
 
 /// A candidate result from YouTube search metadata.
@@ -69,6 +120,7 @@ pub struct DownloadManager {
     tx: mpsc::Sender<DownloadRequest>,
     pending_uris: Arc<Mutex<HashSet<String>>>,
     progress: DownloadProgressMap,
+    pending_queue_path: PathBuf,
 }
 
 impl DownloadManager {
@@ -79,19 +131,31 @@ impl DownloadManager {
         let pending_clone = Arc::clone(&pending_uris);
         let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
         let progress_clone = Arc::clone(&progress);
+        let pending_queue_path = pending_download_queue_path();
+        let thread_pending_queue_path = pending_queue_path.clone();
 
         std::thread::Builder::new()
             .name("download".into())
             .spawn(move || {
-                download_loop(rx, favorites, pending_clone, app_state, progress_clone);
+                download_loop(
+                    rx,
+                    favorites,
+                    pending_clone,
+                    app_state,
+                    progress_clone,
+                    thread_pending_queue_path,
+                );
             })
             .expect("spawn download thread");
 
-        Self {
+        let manager = Self {
             tx,
             pending_uris,
             progress,
-        }
+            pending_queue_path,
+        };
+        manager.restore_pending_downloads();
+        manager
     }
 
     /// Get a reference to the shared progress map for UI rendering.
@@ -118,10 +182,12 @@ impl DownloadManager {
             .lock()
             .unwrap()
             .insert(uri.clone(), DownloadPhase::Queued);
+        persist_pending_download_to(&self.pending_queue_path, &request);
 
         if let Err(e) = self.tx.send(request) {
             eprintln!("download: enqueue failed: {e}");
             self.progress.lock().unwrap().remove(&uri);
+            remove_pending_download_from(&self.pending_queue_path, &uri);
         } else {
             eprintln!(
                 "download: queued uri={} track={} - {} pending={}",
@@ -129,10 +195,134 @@ impl DownloadManager {
             );
         }
     }
+
+    fn restore_pending_downloads(&self) {
+        let restored_count = restore_pending_downloads_from(
+            &self.pending_queue_path,
+            &self.tx,
+            &self.pending_uris,
+            &self.progress,
+        );
+        if restored_count > 0 {
+            eprintln!("download: restored {restored_count} pending download(s)");
+        }
+    }
 }
 
 fn build_search_query(request: &DownloadRequest) -> String {
     format!("{} - {}", request.artist_name, request.track_name)
+}
+
+fn pending_download_queue_path() -> PathBuf {
+    app_paths().data_dir.join("download_queue.json")
+}
+
+fn load_pending_downloads_from(path: &Path) -> Vec<DownloadRequest> {
+    let data = match fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(_) => return Vec::new(),
+    };
+
+    match serde_json::from_str::<Vec<DownloadRequest>>(&data) {
+        Ok(requests) => requests,
+        Err(e) => {
+            eprintln!(
+                "download: pending queue parse error path={} error={e}",
+                path.display()
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn save_pending_downloads_to(path: &Path, requests: &[DownloadRequest]) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let tmp_path = path.with_extension("json.tmp");
+    let json = match serde_json::to_string_pretty(requests) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("download: pending queue serialize error: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = fs::write(&tmp_path, json) {
+        eprintln!(
+            "download: pending queue write failed path={} error={e}",
+            tmp_path.display()
+        );
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        eprintln!(
+            "download: pending queue rename failed path={} error={e}",
+            path.display()
+        );
+    }
+}
+
+fn persist_pending_download_to(path: &Path, request: &DownloadRequest) {
+    let mut requests = load_pending_downloads_from(path);
+    requests.retain(|existing| existing.uri != request.uri);
+    requests.push(request.clone());
+    save_pending_downloads_to(path, &requests);
+}
+
+fn remove_pending_download_from(path: &Path, uri: &str) {
+    let mut requests = load_pending_downloads_from(path);
+    let original_len = requests.len();
+    requests.retain(|request| request.uri != uri);
+    if requests.len() != original_len {
+        save_pending_downloads_to(path, &requests);
+    }
+}
+
+fn restore_pending_downloads_from(
+    path: &Path,
+    tx: &mpsc::Sender<DownloadRequest>,
+    pending_uris: &Arc<Mutex<HashSet<String>>>,
+    progress: &DownloadProgressMap,
+) -> usize {
+    let restored = load_pending_downloads_from(path);
+    if restored.is_empty() {
+        return 0;
+    }
+
+    let mut restored_count = 0;
+    for request in restored {
+        if request.uri.trim().is_empty()
+            || request.track_name.trim().is_empty()
+            || request.artist_name.trim().is_empty()
+        {
+            continue;
+        }
+
+        let mut pending = pending_uris.lock().unwrap();
+        if pending.contains(&request.uri) {
+            continue;
+        }
+        pending.insert(request.uri.clone());
+        drop(pending);
+
+        progress
+            .lock()
+            .unwrap()
+            .insert(request.uri.clone(), DownloadPhase::Queued);
+
+        if let Err(e) = tx.send(request.clone()) {
+            eprintln!("download: restore enqueue failed: {e}");
+            pending_uris.lock().unwrap().remove(&request.uri);
+            progress.lock().unwrap().remove(&request.uri);
+            remove_pending_download_from(path, &request.uri);
+        } else {
+            restored_count += 1;
+        }
+    }
+
+    restored_count
 }
 
 /// Sanitize a string for use as a filename.
@@ -318,6 +508,181 @@ fn title_similarity(candidate_title: &str, reference_title: &str) -> f64 {
     intersection as f64 / reference_words.len() as f64
 }
 
+fn prefer_download_failure(
+    current: DownloadFailureKind,
+    next: DownloadFailureKind,
+) -> DownloadFailureKind {
+    if next.priority() >= current.priority() {
+        next
+    } else {
+        current
+    }
+}
+
+fn classify_ytdlp_launch_error(error: &std::io::Error) -> DownloadFailureKind {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        DownloadFailureKind::MissingYtDlp
+    } else {
+        classify_download_failure(&format!("failed to run yt-dlp: {error}"))
+    }
+}
+
+fn classify_download_failure_bytes(output: &[u8]) -> DownloadFailureKind {
+    classify_download_failure(&String::from_utf8_lossy(output))
+}
+
+fn classify_download_failure(details: &str) -> DownloadFailureKind {
+    let lower = details.to_lowercase();
+    let has_any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+
+    if lower.contains("yt-dlp")
+        && has_any(&[
+            "no such file or directory",
+            "not found",
+            "cannot find",
+            "permission denied",
+        ])
+    {
+        return DownloadFailureKind::MissingYtDlp;
+    }
+
+    if has_any(&["ffmpeg", "ffprobe", "transcoder", FFMPEG_TRANSCODER_BIN])
+        && has_any(&[
+            "no such file or directory",
+            "not found",
+            "cannot find",
+            "not installed",
+            "unable to execute",
+            "ffmpeg-location",
+        ])
+    {
+        return DownloadFailureKind::MissingTranscoder;
+    }
+
+    if has_any(&["libmp3lame", "pcm_s16le", "s16le", "audio tool"]) {
+        return DownloadFailureKind::MissingTranscoder;
+    }
+
+    if has_any(&[
+        "no space left on device",
+        "pyinstaller",
+        "failed to extract",
+        "could not create temporary",
+        "tmpdir",
+        "unpack",
+        "unpacking",
+    ]) {
+        return DownloadFailureKind::TempStorage;
+    }
+
+    if has_any(&[
+        "not a bot",
+        "sign in to confirm",
+        "cookies-from-browser",
+        "use --cookies",
+        "use cookies",
+        "confirm you're not a bot",
+    ]) {
+        return DownloadFailureKind::CookiesBotCheck;
+    }
+
+    if has_any(&[
+        "signature solving failed",
+        "challenge solving failed",
+        "po token",
+        "gvs po token",
+        "n challenge",
+        "nsig",
+    ]) {
+        return DownloadFailureKind::SignatureChallenge;
+    }
+
+    if has_any(&[
+        "temporary failure in name resolution",
+        "name resolution",
+        "could not resolve",
+        "dns",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "connection refused",
+        "connection reset",
+        "tls",
+        "ssl",
+        "certificate",
+        "handshake",
+    ]) {
+        return DownloadFailureKind::Network;
+    }
+
+    if has_any(&[
+        "requested format is not available",
+        "no video formats",
+        "no suitable format",
+        "no matching audio",
+        "duration mismatch",
+    ]) {
+        return DownloadFailureKind::NoMatchingAudio;
+    }
+
+    DownloadFailureKind::Generic
+}
+
+fn spawn_limited_capture_thread<R: Read + Send + 'static>(
+    mut reader: R,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buf = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(captured.len());
+                    if remaining > 0 {
+                        captured.extend_from_slice(&buf[..n.min(remaining)]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        captured
+    })
+}
+
+fn collect_captured_output(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle.and_then(|h| h.join().ok()).unwrap_or_default()
+}
+
+fn apply_ytdlp_progress_line(
+    uri: &str,
+    line: &str,
+    progress: &DownloadProgressMap,
+    app_state: &Arc<Mutex<AppState>>,
+) {
+    if let Some(pct) = parse_ytdlp_progress(line) {
+        progress
+            .lock()
+            .unwrap()
+            .insert(uri.to_string(), DownloadPhase::Downloading(pct));
+        mark_dirty(app_state);
+    }
+}
+
+fn spawn_ytdlp_progress_thread<R: Read + Send + 'static>(
+    reader: R,
+    uri: String,
+    progress: DownloadProgressMap,
+    app_state: Arc<Mutex<AppState>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines().map_while(Result::ok) {
+            apply_ytdlp_progress_line(&uri, &line, &progress, &app_state);
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Post-download validation
 // ---------------------------------------------------------------------------
@@ -361,6 +726,7 @@ fn download_loop(
     pending_uris: Arc<Mutex<HashSet<String>>>,
     app_state: Arc<Mutex<AppState>>,
     progress: DownloadProgressMap,
+    pending_queue_path: PathBuf,
 ) {
     for req in rx.iter() {
         eprintln!(
@@ -372,12 +738,24 @@ fn download_loop(
             let fav = favorites.lock().unwrap();
             if !fav.is_favorited(&req.uri) {
                 eprintln!("download: skipping (unfavorited): {}", req.uri);
-                clear_download_bookkeeping(&req.uri, &pending_uris, &progress, &app_state);
+                clear_download_bookkeeping(
+                    &req.uri,
+                    &pending_uris,
+                    &progress,
+                    &app_state,
+                    &pending_queue_path,
+                );
                 continue;
             }
             if fav.find_by_uri(&req.uri).map_or(false, |e| e.downloaded) {
                 eprintln!("download: skipping (already downloaded): {}", req.uri);
-                clear_download_bookkeeping(&req.uri, &pending_uris, &progress, &app_state);
+                clear_download_bookkeeping(
+                    &req.uri,
+                    &pending_uris,
+                    &progress,
+                    &app_state,
+                    &pending_queue_path,
+                );
                 continue;
             }
         }
@@ -421,7 +799,7 @@ fn download_loop(
 
         let candidates = search_candidates(&search_query, CANDIDATE_COUNT, cookies.as_deref());
 
-        let success = if candidates.is_empty() {
+        let outcome = if candidates.is_empty() {
             eprintln!("download: no candidates found, falling back to direct search");
             try_direct_download(
                 &req,
@@ -464,25 +842,36 @@ fn download_loop(
             )
         };
 
-        if success {
-            finalize_download(&req, &output_path, &cover_path, &favorites);
-        } else {
-            if output_path.exists() {
-                let _ = std::fs::remove_file(&output_path);
-                eprintln!(
-                    "download: removed failed partial uri={} path={}",
-                    req.uri,
-                    output_path.display()
-                );
+        match outcome {
+            DownloadOutcome::Success => {
+                finalize_download(&req, &output_path, &cover_path, &favorites);
             }
-            eprintln!(
-                "download: giving up uri={} track={} - {}",
-                req.uri, req.artist_name, req.track_name
-            );
+            DownloadOutcome::Skipped => {}
+            DownloadOutcome::Failed(kind) => {
+                if output_path.exists() {
+                    let _ = std::fs::remove_file(&output_path);
+                    eprintln!(
+                        "download: removed failed partial uri={} path={}",
+                        req.uri,
+                        output_path.display()
+                    );
+                }
+                eprintln!(
+                    "download: giving up uri={} track={} - {} reason={:?}",
+                    req.uri, req.artist_name, req.track_name, kind
+                );
+                show_final_download_failure_notice(&outcome, &app_state);
+            }
         }
 
         // Clear progress entry and notify UI
-        clear_download_bookkeeping(&req.uri, &pending_uris, &progress, &app_state);
+        clear_download_bookkeeping(
+            &req.uri,
+            &pending_uris,
+            &progress,
+            &app_state,
+            &pending_queue_path,
+        );
     }
 }
 
@@ -497,10 +886,20 @@ fn clear_download_bookkeeping(
     pending_uris: &Arc<Mutex<HashSet<String>>>,
     progress: &DownloadProgressMap,
     app_state: &Arc<Mutex<AppState>>,
+    pending_queue_path: &Path,
 ) {
     progress.lock().unwrap().remove(uri);
     pending_uris.lock().unwrap().remove(uri);
+    remove_pending_download_from(pending_queue_path, uri);
     mark_dirty(app_state);
+}
+
+fn show_final_download_failure_notice(outcome: &DownloadOutcome, app_state: &Arc<Mutex<AppState>>) {
+    if let DownloadOutcome::Failed(kind) = outcome {
+        if let Ok(mut st) = app_state.lock() {
+            st.show_notice(kind.notice(), std::time::Instant::now());
+        }
+    }
 }
 
 /// Try downloading each scored candidate in order, with post-download validation.
@@ -513,14 +912,15 @@ fn try_candidates_download(
     favorites: &Arc<Mutex<FavoritesManager>>,
     progress: &DownloadProgressMap,
     app_state: &Arc<Mutex<AppState>>,
-) -> bool {
+) -> DownloadOutcome {
+    let mut final_failure = DownloadFailureKind::NoMatchingAudio;
     for (rank, (score, cand)) in scored.iter().enumerate() {
         if !favorites.lock().unwrap().is_favorited(&req.uri) {
             eprintln!(
                 "download: skipping (unfavorited during search): {}",
                 req.uri
             );
-            return false;
+            return DownloadOutcome::Skipped;
         }
 
         // Reset progress for each new candidate attempt
@@ -539,7 +939,7 @@ fn try_candidates_download(
             req.uri
         );
 
-        if download_single_url(
+        match download_single_url(
             &yt_url,
             output_template,
             cookies,
@@ -548,23 +948,34 @@ fn try_candidates_download(
             app_state,
             req.spotify_duration_ms,
         ) {
-            match validate_downloaded_track(output_path, req.spotify_duration_ms) {
-                Ok(_) => return true,
-                Err(reason) => {
-                    eprintln!(
-                        "download: candidate #{} rejected: {} uri={}",
-                        rank + 1,
-                        reason,
-                        req.uri
-                    );
+            DownloadOutcome::Success => {
+                match validate_downloaded_track(output_path, req.spotify_duration_ms) {
+                    Ok(_) => return DownloadOutcome::Success,
+                    Err(reason) => {
+                        eprintln!(
+                            "download: candidate #{} rejected: {} uri={}",
+                            rank + 1,
+                            reason,
+                            req.uri
+                        );
+                        final_failure = prefer_download_failure(
+                            final_failure,
+                            classify_download_failure(&reason),
+                        );
+                        let _ = std::fs::remove_file(output_path);
+                    }
+                }
+            }
+            DownloadOutcome::Skipped => return DownloadOutcome::Skipped,
+            DownloadOutcome::Failed(kind) => {
+                final_failure = prefer_download_failure(final_failure, kind);
+                if output_path.exists() {
                     let _ = std::fs::remove_file(output_path);
                 }
             }
-        } else if output_path.exists() {
-            let _ = std::fs::remove_file(output_path);
         }
     }
-    false
+    DownloadOutcome::Failed(final_failure)
 }
 
 /// Download audio from a specific YouTube URL, reporting progress via file size polling.
@@ -576,7 +987,7 @@ fn download_single_url(
     progress: &DownloadProgressMap,
     app_state: &Arc<Mutex<AppState>>,
     expected_duration_ms: Option<i64>,
-) -> bool {
+) -> DownloadOutcome {
     let mut cmd = Command::new(YTDLP_BIN);
     cmd.args([
         "-x",
@@ -587,19 +998,32 @@ fn download_single_url(
         "--no-playlist",
         "--ffmpeg-location",
         FFMPEG_TRANSCODER_BIN,
+        "--newline",
+        "--progress",
         "-o",
         output_template,
     ]);
     apply_ytdlp_opts(&mut cmd, cookies);
     cmd.arg(url);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("download: failed to run yt-dlp: {e}");
-            return false;
+            return DownloadOutcome::Failed(classify_ytdlp_launch_error(&e));
         }
     };
+    let stderr_handle = child.stderr.take().map(spawn_limited_capture_thread);
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        spawn_ytdlp_progress_thread(
+            stdout,
+            uri.to_string(),
+            Arc::clone(progress),
+            Arc::clone(app_state),
+        )
+    });
 
     // Poll file size in a background thread to estimate progress
     let poll_uri = uri.to_string();
@@ -661,21 +1085,30 @@ fn download_single_url(
     match child.wait() {
         Ok(status) => {
             let _ = poll_handle.join();
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            let stderr = collect_captured_output(stderr_handle);
             if status.success() {
-                true
+                DownloadOutcome::Success
             } else {
                 eprintln!(
-                    "download: yt-dlp failed url={} status={}",
+                    "download: yt-dlp failed url={} status={} stderr={}",
                     url,
                     exit_status_label(&status),
+                    summarize_command_output(&stderr)
                 );
-                false
+                DownloadOutcome::Failed(classify_download_failure_bytes(&stderr))
             }
         }
         Err(e) => {
             eprintln!("download: yt-dlp wait error: {e}");
             let _ = poll_handle.join();
-            false
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            let _ = collect_captured_output(stderr_handle);
+            DownloadOutcome::Failed(DownloadFailureKind::Generic)
         }
     }
 }
@@ -704,7 +1137,8 @@ fn try_direct_download(
     favorites: &Arc<Mutex<FavoritesManager>>,
     progress: &DownloadProgressMap,
     app_state: &Arc<Mutex<AppState>>,
-) -> bool {
+) -> DownloadOutcome {
+    let mut final_failure = DownloadFailureKind::Generic;
     for attempt in 0..=MAX_RETRIES {
         if attempt > 0 {
             eprintln!(
@@ -715,7 +1149,7 @@ fn try_direct_download(
 
             if !favorites.lock().unwrap().is_favorited(&req.uri) {
                 eprintln!("download: skipping retry (unfavorited): {}", req.uri);
-                break;
+                return DownloadOutcome::Skipped;
             }
         }
 
@@ -735,7 +1169,7 @@ fn try_direct_download(
         );
 
         let search_url = format!("ytsearch1:{}", search_query);
-        if download_single_url(
+        match download_single_url(
             &search_url,
             output_template,
             cookies,
@@ -744,21 +1178,32 @@ fn try_direct_download(
             app_state,
             req.spotify_duration_ms,
         ) {
-            match validate_downloaded_track(output_path, req.spotify_duration_ms) {
-                Ok(_) => return true,
-                Err(reason) => {
-                    eprintln!(
-                        "download: direct download rejected: {} uri={}",
-                        reason, req.uri
-                    );
+            DownloadOutcome::Success => {
+                match validate_downloaded_track(output_path, req.spotify_duration_ms) {
+                    Ok(_) => return DownloadOutcome::Success,
+                    Err(reason) => {
+                        eprintln!(
+                            "download: direct download rejected: {} uri={}",
+                            reason, req.uri
+                        );
+                        final_failure = prefer_download_failure(
+                            final_failure,
+                            classify_download_failure(&reason),
+                        );
+                        let _ = std::fs::remove_file(output_path);
+                    }
+                }
+            }
+            DownloadOutcome::Skipped => return DownloadOutcome::Skipped,
+            DownloadOutcome::Failed(kind) => {
+                final_failure = prefer_download_failure(final_failure, kind);
+                if output_path.exists() {
                     let _ = std::fs::remove_file(output_path);
                 }
             }
-        } else if output_path.exists() {
-            let _ = std::fs::remove_file(output_path);
         }
     }
-    false
+    DownloadOutcome::Failed(final_failure)
 }
 
 /// Finalize a successful download: probe duration, update favorites, fetch cover.
@@ -1150,6 +1595,27 @@ mod tests {
         assert_eq!(result, Some(0.0));
     }
 
+    #[test]
+    fn ytdlp_progress_line_updates_download_progress() {
+        let uri = "spotify:track:progress";
+        let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+
+        apply_ytdlp_progress_line(
+            uri,
+            "[download]  45.2% of 3.5MiB at 1.2MiB/s",
+            &progress,
+            &app_state,
+        );
+
+        let phase = *progress.lock().unwrap().get(uri).unwrap();
+        match phase {
+            DownloadPhase::Downloading(pct) => assert!((pct - 0.452).abs() < 0.001),
+            other => panic!("expected downloading progress, got {other:?}"),
+        }
+        assert!(app_state.lock().unwrap().render_dirty);
+    }
+
     // --- Overall progress mapping ---
 
     #[test]
@@ -1182,9 +1648,18 @@ mod tests {
     #[test]
     fn clear_download_bookkeeping_removes_progress_and_pending_state() {
         let uri = "spotify:track:queued";
+        let dir = temp_test_dir("clear-download-bookkeeping");
+        let queue_path = dir.join("download_queue.json");
         let pending = Arc::new(Mutex::new(HashSet::new()));
         let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
         let app_state = Arc::new(Mutex::new(AppState::new()));
+        let request = DownloadRequest {
+            uri: uri.to_string(),
+            track_name: "Queued".to_string(),
+            artist_name: "Artist".to_string(),
+            cover_url: String::new(),
+            spotify_duration_ms: None,
+        };
 
         pending.lock().unwrap().insert(uri.to_string());
         progress
@@ -1192,10 +1667,213 @@ mod tests {
             .unwrap()
             .insert(uri.to_string(), DownloadPhase::Queued);
 
-        clear_download_bookkeeping(uri, &pending, &progress, &app_state);
+        save_pending_downloads_to(&queue_path, &[request]);
+
+        clear_download_bookkeeping(uri, &pending, &progress, &app_state, &queue_path);
 
         assert!(!pending.lock().unwrap().contains(uri));
         assert!(!progress.lock().unwrap().contains_key(uri));
+        assert!(load_pending_downloads_from(&queue_path).is_empty());
         assert!(app_state.lock().unwrap().render_dirty);
+    }
+
+    #[test]
+    fn pending_download_queue_round_trips_requests() {
+        let dir = temp_test_dir("pending-download-roundtrip");
+        let path = dir.join("download_queue.json");
+        let request = sample_request();
+
+        save_pending_downloads_to(&path, &[request.clone()]);
+        let restored = load_pending_downloads_from(&path);
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].uri, request.uri);
+        assert_eq!(restored[0].track_name, request.track_name);
+        assert_eq!(restored[0].artist_name, request.artist_name);
+        assert_eq!(restored[0].spotify_duration_ms, request.spotify_duration_ms);
+    }
+
+    #[test]
+    fn pending_download_queue_removes_terminal_request() {
+        let dir = temp_test_dir("pending-download-remove");
+        let path = dir.join("download_queue.json");
+        let first = sample_request();
+        let second = DownloadRequest {
+            uri: "spotify:track:456".to_string(),
+            track_name: "Second".to_string(),
+            artist_name: "Artist".to_string(),
+            cover_url: String::new(),
+            spotify_duration_ms: None,
+        };
+
+        save_pending_downloads_to(&path, &[first.clone(), second.clone()]);
+        remove_pending_download_from(&path, &first.uri);
+
+        let restored = load_pending_downloads_from(&path);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].uri, second.uri);
+    }
+
+    #[test]
+    fn restore_pending_downloads_marks_progress_and_sends_requests() {
+        let dir = temp_test_dir("pending-download-restore");
+        let path = dir.join("download_queue.json");
+        let request = sample_request();
+        save_pending_downloads_to(&path, &[request.clone()]);
+
+        let (tx, rx) = mpsc::channel::<DownloadRequest>();
+        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
+
+        let restored = restore_pending_downloads_from(&path, &tx, &pending, &progress);
+
+        assert_eq!(restored, 1);
+        assert!(pending.lock().unwrap().contains(&request.uri));
+        assert_eq!(
+            progress.lock().unwrap().get(&request.uri),
+            Some(&DownloadPhase::Queued)
+        );
+        assert_eq!(rx.try_recv().unwrap().uri, request.uri);
+    }
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "sideb-{prefix}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn classifies_bot_check_cookie_failures() {
+        let stderr =
+            "ERROR: [youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser";
+        assert_eq!(
+            classify_download_failure(stderr),
+            DownloadFailureKind::CookiesBotCheck
+        );
+        assert_eq!(
+            DownloadFailureKind::CookiesBotCheck.notice(),
+            "Cookie check failed"
+        );
+    }
+
+    #[test]
+    fn classifies_signature_challenge_po_token_failures() {
+        assert_eq!(
+            classify_download_failure("Signature solving failed: some formats may be missing"),
+            DownloadFailureKind::SignatureChallenge
+        );
+        assert_eq!(
+            classify_download_failure("web_music client https formats require a GVS PO Token"),
+            DownloadFailureKind::SignatureChallenge
+        );
+        assert_eq!(
+            DownloadFailureKind::SignatureChallenge.notice(),
+            "YouTube challenge"
+        );
+    }
+
+    #[test]
+    fn classifies_network_dns_tls_timeout_failures() {
+        let cases = [
+            "Temporary failure in name resolution",
+            "Connection timed out",
+            "TLS handshake failed",
+            "Network is unreachable",
+        ];
+        for stderr in cases {
+            assert_eq!(
+                classify_download_failure(stderr),
+                DownloadFailureKind::Network
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_temp_storage_unpack_failures() {
+        let cases = [
+            "No space left on device",
+            "PyInstaller: failed to extract _brotli to /tmp",
+            "could not create temporary file in TMPDIR",
+        ];
+        for stderr in cases {
+            assert_eq!(
+                classify_download_failure(stderr),
+                DownloadFailureKind::TempStorage
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_missing_runtime_helpers() {
+        assert_eq!(
+            classify_download_failure("failed to run yt-dlp: No such file or directory"),
+            DownloadFailureKind::MissingYtDlp
+        );
+        assert_eq!(
+            classify_download_failure(
+                "ERROR: ffmpeg not found. Please install or provide --ffmpeg-location"
+            ),
+            DownloadFailureKind::MissingTranscoder
+        );
+        assert_eq!(
+            classify_download_failure("ERROR: Unknown encoder 'libmp3lame'"),
+            DownloadFailureKind::MissingTranscoder
+        );
+        assert_eq!(
+            classify_download_failure("ERROR: muxer s16le is unavailable"),
+            DownloadFailureKind::MissingTranscoder
+        );
+        assert_eq!(DownloadFailureKind::MissingYtDlp.notice(), "Missing yt-dlp");
+        assert_eq!(
+            DownloadFailureKind::MissingTranscoder.notice(),
+            "Audio tool failed"
+        );
+    }
+
+    #[test]
+    fn classifies_no_matching_audio_and_generic_failures() {
+        assert_eq!(
+            classify_download_failure("Requested format is not available"),
+            DownloadFailureKind::NoMatchingAudio
+        );
+        assert_eq!(
+            classify_download_failure("duration mismatch: spotify=1000ms file=5000ms"),
+            DownloadFailureKind::NoMatchingAudio
+        );
+        assert_eq!(
+            classify_download_failure("unexpected extractor failure"),
+            DownloadFailureKind::Generic
+        );
+    }
+
+    #[test]
+    fn final_download_notice_is_only_shown_for_failed_outcomes() {
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+
+        show_final_download_failure_notice(&DownloadOutcome::Skipped, &app_state);
+        assert!(app_state.lock().unwrap().notice.is_none());
+
+        show_final_download_failure_notice(&DownloadOutcome::Success, &app_state);
+        assert!(app_state.lock().unwrap().notice.is_none());
+
+        show_final_download_failure_notice(
+            &DownloadOutcome::Failed(DownloadFailureKind::Network),
+            &app_state,
+        );
+
+        assert_eq!(
+            app_state
+                .lock()
+                .unwrap()
+                .active_notice_message(std::time::Instant::now()),
+            Some("Network error".to_string())
+        );
     }
 }

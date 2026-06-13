@@ -41,6 +41,8 @@ use mode::{AppMode, InputAction};
 use paths::{app_paths, detect_paths, init_paths};
 use render::RenderState;
 
+const SIDEB_AUTOSTART_LOCAL_PLAYBACK_ENV: &str = "SIDEB_AUTOSTART_LOCAL_PLAYBACK";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaylistMove {
     Up,
@@ -127,13 +129,16 @@ fn main() {
     )));
     let local_player = Arc::new(Mutex::new(LocalPlayer::new()));
 
-    let imported = local_import::scan_once(&favorites);
-    if imported > 0 {
-        eprintln!("import: startup imported {imported} local track(s)");
-    }
     let cover_updates = local_import::sync_existing_music_covers(&favorites);
     if cover_updates > 0 {
         eprintln!("import: startup linked {cover_updates} existing cover file(s)");
+    }
+    let startup_import_count = local_import::pending_import_count();
+    if startup_import_count > 0 {
+        app_state
+            .lock()
+            .unwrap()
+            .set_import_progress(0, startup_import_count);
     }
 
     // Clean up orphaned files in music directory
@@ -147,33 +152,6 @@ fn main() {
     let download_progress = Arc::clone(download_manager.progress());
 
     battery::refresh_app_state(&app_state);
-
-    // Resume incomplete downloads from previous session
-    {
-        let fav = favorites.lock().unwrap();
-        let pending: Vec<_> = fav
-            .all_entries()
-            .iter()
-            .filter(|e| !e.downloaded && e.source == FavoriteSource::Spotify)
-            .cloned()
-            .collect();
-        drop(fav);
-        if !pending.is_empty() {
-            eprintln!(
-                "download: resuming {} incomplete download(s) from previous session",
-                pending.len()
-            );
-            for entry in &pending {
-                download_manager.enqueue(DownloadRequest {
-                    uri: entry.uri.clone(),
-                    track_name: entry.name.clone(),
-                    artist_name: entry.artist.clone(),
-                    cover_url: entry.cover_url.clone(),
-                    spotify_duration_ms: entry.spotify_duration_ms,
-                });
-            }
-        }
-    }
 
     // Set initial mode: Local (paused) if favorites exist, else Waiting
     {
@@ -200,7 +178,10 @@ fn main() {
     {
         let st = app_state.lock().unwrap();
         let rs = render_state.lock().unwrap();
-        if st.mode == AppMode::Waiting {
+        if let Some(msg) = st.import_progress_message() {
+            back_buf.copy_from_slice(&rs.scene_waiting);
+            render::draw_waiting_import_progress(&mut back_buf, &fonts, &msg);
+        } else if st.mode == AppMode::Waiting {
             back_buf.copy_from_slice(&rs.scene_waiting);
         } else {
             back_buf.copy_from_slice(&rs.scene_playing);
@@ -327,6 +308,15 @@ fn main() {
             );
         })
         .expect("spawn power monitor thread");
+
+    if autostart_local_playback_enabled(
+        std::env::var(SIDEB_AUTOSTART_LOCAL_PLAYBACK_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        eprintln!("local_player: autostart local playback requested");
+        let _ = cmd_tx.send(InputAction::StartLocalPlayback);
+    }
 
     // Run render loop on main thread
     let render_quit = Arc::clone(&quit);
@@ -873,6 +863,17 @@ fn command_processor(
                 refresh_library_state(&app_state, &render_state, &favorites, &local_player);
             }
 
+            InputAction::ImportProgress { completed, total } => {
+                app_state
+                    .lock()
+                    .unwrap()
+                    .set_import_progress(completed, total);
+            }
+
+            InputAction::ImportFinished => {
+                app_state.lock().unwrap().clear_import_progress();
+            }
+
             InputAction::SpotifyActivated => {
                 if app_state.lock().unwrap().screen_locked {
                     screen_backlight.unlock();
@@ -985,7 +986,7 @@ fn command_processor(
     }
 }
 
-fn show_user_notice(app_state: &Arc<Mutex<AppState>>, message: &'static str) {
+fn show_user_notice(app_state: &Arc<Mutex<AppState>>, message: impl Into<String>) {
     app_state
         .lock()
         .unwrap()
@@ -1308,6 +1309,15 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
     }
 }
 
+fn autostart_local_playback_enabled(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,6 +1389,16 @@ mod tests {
     fn playlist_selection_stays_zero_when_list_is_empty() {
         assert_eq!(advance_playlist_selection(0, 0, PlaylistMove::Up), 0);
         assert_eq!(advance_playlist_selection(0, 0, PlaylistMove::Down), 0);
+    }
+
+    #[test]
+    fn autostart_local_playback_flag_requires_truthy_value() {
+        assert!(autostart_local_playback_enabled(Some("1")));
+        assert!(autostart_local_playback_enabled(Some("true")));
+        assert!(autostart_local_playback_enabled(Some("yes")));
+        assert!(!autostart_local_playback_enabled(Some("0")));
+        assert!(!autostart_local_playback_enabled(Some("")));
+        assert!(!autostart_local_playback_enabled(None));
     }
 
     #[test]

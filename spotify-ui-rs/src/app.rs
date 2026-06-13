@@ -20,8 +20,14 @@ pub struct ConfirmationState {
 
 #[derive(Debug, Clone)]
 pub struct NoticeState {
-    pub message: &'static str,
+    pub message: String,
     pub until: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportProgressState {
+    pub completed: usize,
+    pub total: usize,
 }
 
 /// Mutable application state protected by a Mutex.
@@ -63,6 +69,7 @@ pub struct AppState {
     // -- Confirmations --
     pub confirmation: Option<ConfirmationState>,
     pub notice: Option<NoticeState>,
+    pub import_progress: Option<ImportProgressState>,
 }
 
 impl AppState {
@@ -105,6 +112,7 @@ impl AppState {
 
             confirmation: None,
             notice: None,
+            import_progress: None,
         }
     }
 
@@ -166,24 +174,54 @@ impl AppState {
         }
     }
 
-    pub fn show_notice(&mut self, message: &'static str, now: Instant) {
+    pub fn show_notice(&mut self, message: impl Into<String>, now: Instant) {
         self.notice = Some(NoticeState {
-            message,
+            message: message.into(),
             until: now + std::time::Duration::from_secs(NOTICE_WINDOW_SECS),
         });
         self.render_dirty = true;
     }
 
-    pub fn active_notice_message(&mut self, now: Instant) -> Option<&'static str> {
-        match self.notice.as_ref() {
-            Some(NoticeState { message, until }) if now < *until => Some(message),
-            Some(_) => {
-                self.notice = None;
-                self.render_dirty = true;
+    pub fn active_notice_message(&mut self, now: Instant) -> Option<String> {
+        let active_message = self.notice.as_ref().and_then(|notice| {
+            if now < notice.until {
+                Some(notice.message.clone())
+            } else {
                 None
             }
-            None => None,
+        });
+
+        if active_message.is_some() {
+            return active_message;
         }
+
+        if self.notice.is_some() {
+            self.notice = None;
+            self.render_dirty = true;
+        }
+        None
+    }
+
+    pub fn set_import_progress(&mut self, completed: usize, total: usize) {
+        let total = total.max(1);
+        let completed = completed.min(total);
+        let progress = Some(ImportProgressState { completed, total });
+        if self.import_progress != progress {
+            self.import_progress = progress;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn clear_import_progress(&mut self) {
+        if self.import_progress.is_some() {
+            self.import_progress = None;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn import_progress_message(&self) -> Option<String> {
+        self.import_progress
+            .map(|progress| format!("Importing MP3s {}/{}", progress.completed, progress.total))
     }
 
     pub fn boost_status_sync(&mut self, now: Instant, duration: std::time::Duration) {
@@ -336,15 +374,35 @@ mod tests {
 
         state.show_notice("Missing ffmpeg", now);
 
-        assert_eq!(state.active_notice_message(now), Some("Missing ffmpeg"));
+        assert_eq!(
+            state.active_notice_message(now),
+            Some("Missing ffmpeg".to_string())
+        );
         assert_eq!(
             state.active_notice_message(now + std::time::Duration::from_millis(2999)),
-            Some("Missing ffmpeg")
+            Some("Missing ffmpeg".to_string())
         );
         assert_eq!(
             state.active_notice_message(now + std::time::Duration::from_secs(3)),
             None
         );
+    }
+
+    #[test]
+    fn import_progress_message_tracks_completed_and_total() {
+        let mut state = AppState::new();
+
+        state.set_import_progress(32, 150);
+
+        assert_eq!(
+            state.import_progress_message(),
+            Some("Importing MP3s 32/150".to_string())
+        );
+        assert!(state.render_dirty);
+
+        state.clear_import_progress();
+
+        assert_eq!(state.import_progress_message(), None);
     }
 
     #[test]

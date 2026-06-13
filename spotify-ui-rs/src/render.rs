@@ -348,25 +348,23 @@ fn draw_footer_hints(buf: &mut [u8], fonts: &FontSet) {
     }
 }
 
-fn draw_waiting_text(buf: &mut [u8], fonts: &FontSet, startup_loading: bool) {
-    let msg = waiting_status_message(startup_loading);
-
+fn draw_waiting_footer(buf: &mut [u8], fonts: &FontSet, message: &str, exit_hint: Option<&str>) {
     drawing::fill_rect(
         buf,
         0,
-        HINTS_BASELINE_Y - 28,
+        STATUS_BASELINE_Y - 32,
         SCREEN_W as i32,
-        48,
+        SCREEN_H as i32 - (STATUS_BASELINE_Y - 32),
         0,
         0,
         0,
         255,
     );
 
-    let msg_w = fonts.measure_text(msg, fonts.scale_large);
+    let msg_w = fonts.measure_text(message, fonts.scale_large);
     fonts.draw_text(
         buf,
-        msg,
+        message,
         SCREEN_W as i32 / 2 - msg_w / 2,
         STATUS_BASELINE_Y,
         255,
@@ -375,7 +373,7 @@ fn draw_waiting_text(buf: &mut [u8], fonts: &FontSet, startup_loading: bool) {
         fonts.scale_large,
     );
 
-    if let Some(exit_hint) = waiting_exit_hint(startup_loading) {
+    if let Some(exit_hint) = exit_hint {
         let hint_w = fonts.measure_text(exit_hint, fonts.scale_small);
         fonts.draw_text(
             buf,
@@ -388,6 +386,19 @@ fn draw_waiting_text(buf: &mut [u8], fonts: &FontSet, startup_loading: bool) {
             fonts.scale_small,
         );
     }
+}
+
+fn draw_waiting_text(buf: &mut [u8], fonts: &FontSet, startup_loading: bool) {
+    draw_waiting_footer(
+        buf,
+        fonts,
+        waiting_status_message(startup_loading),
+        waiting_exit_hint(startup_loading),
+    );
+}
+
+pub(crate) fn draw_waiting_import_progress(buf: &mut [u8], fonts: &FontSet, message: &str) {
+    draw_waiting_footer(buf, fonts, message, None);
 }
 
 fn draw_footer_notice(buf: &mut [u8], fonts: &FontSet, message: &str) {
@@ -794,12 +805,16 @@ pub fn render_loop(
         let dt = now.duration_since(last_frame);
         last_frame = now;
 
-        let (mode, paused, dirty, playlist_visible, screen_locked);
+        let (mode, paused, dirty, playlist_visible, screen_locked, importing);
         {
             let mut st = app_state.lock().unwrap();
             mode = st.mode;
             paused = st.paused;
-            dirty = st.render_dirty || st.confirmation.is_some() || st.notice.is_some();
+            importing = st.import_progress.is_some();
+            dirty = st.render_dirty
+                || st.confirmation.is_some()
+                || st.notice.is_some()
+                || st.import_progress.is_some();
             playlist_visible = st.playlist_visible;
             screen_locked = st.screen_locked;
 
@@ -842,8 +857,9 @@ pub fn render_loop(
             last_screen_locked = false;
         }
 
-        // For scene mode sync, treat Local as connected (shows playing scene)
-        let scene_connected = mode != AppMode::Waiting;
+        let display_waiting_scene = importing || mode == AppMode::Waiting;
+        // For scene mode sync, treat importing as waiting so the cassette waiting scene is shown.
+        let scene_connected = !display_waiting_scene;
         let full_redraw = {
             let mut rs = render_state.lock().unwrap();
             sync_scene_mode(&mut rs, last_connected, scene_connected);
@@ -856,7 +872,7 @@ pub fn render_loop(
         last_connected = scene_connected;
         last_playlist_visible = playlist_visible;
 
-        let scene_playing = mode != AppMode::Waiting;
+        let scene_playing = !display_waiting_scene;
         let plan = frame_plan(
             scene_connected,
             paused,
@@ -874,13 +890,17 @@ pub fn render_loop(
         }
 
         let render_started = Instant::now();
-        if mode == AppMode::Waiting {
+        if display_waiting_scene {
             let mut rs = render_state.lock().unwrap();
             if rs.full_redraw || dirty {
                 back_buf.copy_from_slice(&rs.scene_waiting);
 
-                // Exit confirmation overlay on waiting screen
-                {
+                if importing {
+                    if let Some(msg) = app_state.lock().unwrap().import_progress_message() {
+                        draw_waiting_footer(back_buf, fonts, &msg, None);
+                    }
+                } else {
+                    // Exit confirmation overlay on waiting screen
                     let mut st = app_state.lock().unwrap();
                     if let Some(msg) = st.active_confirmation_message(std::time::Instant::now()) {
                         let status_rect = STATUS_BAR_DIRTY_RECT;
@@ -917,13 +937,19 @@ pub fn render_loop(
                     }
 
                     if let Some(msg) = st.active_notice_message(std::time::Instant::now()) {
-                        draw_footer_notice(back_buf, fonts, msg);
+                        draw_footer_notice(back_buf, fonts, &msg);
                     }
-                }
 
-                // Playlist overlay on waiting screen
-                if playlist_visible {
-                    render_playlist(back_buf, &app_state, &favorites, fonts, &download_progress);
+                    // Playlist overlay on waiting screen
+                    if playlist_visible {
+                        render_playlist(
+                            back_buf,
+                            &app_state,
+                            &favorites,
+                            fonts,
+                            &download_progress,
+                        );
+                    }
                 }
 
                 fb.swap_buffers(back_buf);
@@ -1042,7 +1068,7 @@ pub fn render_loop(
                 }
 
                 if let Some(msg) = notice_msg {
-                    draw_footer_notice(back_buf, fonts, msg);
+                    draw_footer_notice(back_buf, fonts, &msg);
                 }
             }
 

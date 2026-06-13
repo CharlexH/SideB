@@ -1,13 +1,74 @@
-use std::process::{Child, Command, Stdio};
+use std::ffi::{CStr, CString};
+use std::io::Read;
+use std::os::raw::{c_char, c_int, c_void};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::constants::FFMPEG_TRANSCODER_BIN;
 use crate::favorites::FavoriteEntry;
 
+const PCM_SAMPLE_RATE: i32 = 44_100;
+const PCM_CHANNELS: usize = 2;
+const PCM_RING_SECONDS: usize = 3;
+
+#[derive(Debug)]
+struct PcmRingBuffer {
+    samples: Vec<i16>,
+    read_pos: usize,
+    write_pos: usize,
+    available: usize,
+}
+
+impl PcmRingBuffer {
+    fn new(capacity_samples: usize) -> Self {
+        Self {
+            samples: vec![0; capacity_samples.max(1)],
+            read_pos: 0,
+            write_pos: 0,
+            available: 0,
+        }
+    }
+
+    fn available_samples(&self) -> usize {
+        self.available
+    }
+
+    fn write_samples(&mut self, input: &[i16]) -> usize {
+        let writable = input.len().min(self.samples.len() - self.available);
+        for sample in input.iter().take(writable) {
+            self.samples[self.write_pos] = *sample;
+            self.write_pos = (self.write_pos + 1) % self.samples.len();
+        }
+        self.available += writable;
+        writable
+    }
+
+    fn read_samples(&mut self, output: &mut [i16]) -> usize {
+        let readable = output.len().min(self.available);
+        for out in output.iter_mut().take(readable) {
+            *out = self.samples[self.read_pos];
+            self.read_pos = (self.read_pos + 1) % self.samples.len();
+        }
+        self.available -= readable;
+        for out in output.iter_mut().skip(readable) {
+            *out = 0;
+        }
+        readable
+    }
+
+    fn clear(&mut self) {
+        self.read_pos = 0;
+        self.write_pos = 0;
+        self.available = 0;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalPlaybackError {
     MissingDecoder,
-    MissingAplay,
     SpawnFailed,
     MissingAudioPipe,
     FileMissing,
@@ -18,17 +79,378 @@ impl LocalPlaybackError {
     pub fn notice(self) -> &'static str {
         match self {
             Self::MissingDecoder => "Missing ffmpeg",
-            Self::MissingAplay => "Missing aplay",
             Self::FileMissing => "File missing",
             Self::MissingAudioPipe | Self::NoPlayableTrack | Self::SpawnFailed => "Playback failed",
         }
     }
 }
 
-/// Manages local audio playback via ffmpeg | aplay subprocess pipeline.
-pub struct LocalPlayer {
+enum PlaybackSession {
+    Sdl(SdlPlayback),
+}
+
+impl PlaybackSession {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Sdl(_) => "sdl",
+        }
+    }
+
+    fn pause(&mut self) {
+        match self {
+            Self::Sdl(session) => session.pause(),
+        }
+    }
+
+    fn resume(&mut self) {
+        match self {
+            Self::Sdl(session) => session.resume(),
+        }
+    }
+
+    fn stop(&mut self) {
+        match self {
+            Self::Sdl(session) => session.stop(),
+        }
+    }
+
+    fn is_finished(&mut self) -> bool {
+        match self {
+            Self::Sdl(session) => session.is_finished(),
+        }
+    }
+
+    fn position_ms(&self) -> Option<i64> {
+        match self {
+            Self::Sdl(session) => Some(session.position_ms()),
+        }
+    }
+}
+
+#[repr(C)]
+struct SdlAudioSpec {
+    freq: c_int,
+    format: u16,
+    channels: u8,
+    silence: u8,
+    samples: u16,
+    padding: u16,
+    size: u32,
+    callback: Option<unsafe extern "C" fn(*mut c_void, *mut u8, c_int)>,
+    userdata: *mut c_void,
+}
+
+type SdlInitSubSystem = unsafe extern "C" fn(u32) -> c_int;
+type SdlQuitSubSystem = unsafe extern "C" fn(u32);
+type SdlOpenAudioDevice = unsafe extern "C" fn(
+    *const c_char,
+    c_int,
+    *const SdlAudioSpec,
+    *mut SdlAudioSpec,
+    c_int,
+) -> u32;
+type SdlPauseAudioDevice = unsafe extern "C" fn(u32, c_int);
+type SdlCloseAudioDevice = unsafe extern "C" fn(u32);
+type SdlGetError = unsafe extern "C" fn() -> *const c_char;
+
+struct SdlLibrary {
+    handle: *mut c_void,
+    init_sub_system: SdlInitSubSystem,
+    quit_sub_system: SdlQuitSubSystem,
+    open_audio_device: SdlOpenAudioDevice,
+    pause_audio_device: SdlPauseAudioDevice,
+    close_audio_device: SdlCloseAudioDevice,
+    get_error: SdlGetError,
+}
+
+unsafe impl Send for SdlLibrary {}
+unsafe impl Sync for SdlLibrary {}
+
+impl SdlLibrary {
+    fn load() -> Result<Arc<Self>, LocalPlaybackError> {
+        const CANDIDATES: [&str; 3] = [
+            "/usr/trimui/lib/libSDL2-2.0.so.0",
+            "libSDL2-2.0.so.0",
+            "libSDL2.so",
+        ];
+
+        for candidate in CANDIDATES {
+            let Ok(path) = CString::new(candidate) else {
+                continue;
+            };
+            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if handle.is_null() {
+                eprintln!(
+                    "local_player: SDL load failed candidate={candidate}: {}",
+                    dynamic_loader_error()
+                );
+                continue;
+            }
+
+            let library = unsafe {
+                Self {
+                    handle,
+                    init_sub_system: load_sdl_symbol(handle, "SDL_InitSubSystem")?,
+                    quit_sub_system: load_sdl_symbol(handle, "SDL_QuitSubSystem")?,
+                    open_audio_device: load_sdl_symbol(handle, "SDL_OpenAudioDevice")?,
+                    pause_audio_device: load_sdl_symbol(handle, "SDL_PauseAudioDevice")?,
+                    close_audio_device: load_sdl_symbol(handle, "SDL_CloseAudioDevice")?,
+                    get_error: load_sdl_symbol(handle, "SDL_GetError")?,
+                }
+            };
+            eprintln!("local_player: SDL loaded from {candidate}");
+            return Ok(Arc::new(library));
+        }
+
+        eprintln!("local_player: SDL library not found");
+        Err(LocalPlaybackError::SpawnFailed)
+    }
+
+    fn error_string(&self) -> String {
+        let error = unsafe { (self.get_error)() };
+        if error.is_null() {
+            return "unknown".to_string();
+        }
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn dynamic_loader_error() -> String {
+    let error = unsafe { libc::dlerror() };
+    if error.is_null() {
+        return "unknown".to_string();
+    }
+    unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+impl Drop for SdlLibrary {
+    fn drop(&mut self) {
+        unsafe {
+            libc::dlclose(self.handle);
+        }
+    }
+}
+
+unsafe fn load_sdl_symbol<T: Copy>(
+    handle: *mut c_void,
+    name: &str,
+) -> Result<T, LocalPlaybackError> {
+    let symbol_name = CString::new(name).map_err(|_| LocalPlaybackError::SpawnFailed)?;
+    let symbol = libc::dlsym(handle, symbol_name.as_ptr());
+    if symbol.is_null() {
+        eprintln!("local_player: SDL missing symbol {name}");
+        return Err(LocalPlaybackError::SpawnFailed);
+    }
+    Ok(std::mem::transmute_copy(&symbol))
+}
+
+struct SdlShared {
+    ring: Mutex<PcmRingBuffer>,
+    producer_eof: AtomicBool,
+    stop_requested: AtomicBool,
+    output_samples: AtomicU64,
+    underruns: AtomicU64,
+}
+
+impl SdlShared {
+    fn new() -> Self {
+        Self {
+            ring: Mutex::new(PcmRingBuffer::new(
+                PCM_SAMPLE_RATE as usize * PCM_CHANNELS * PCM_RING_SECONDS,
+            )),
+            producer_eof: AtomicBool::new(false),
+            stop_requested: AtomicBool::new(false),
+            output_samples: AtomicU64::new(0),
+            underruns: AtomicU64::new(0),
+        }
+    }
+}
+
+struct SdlCallbackState {
+    shared: Arc<SdlShared>,
+}
+
+struct SdlAudioDevice {
+    lib: Arc<SdlLibrary>,
+    id: u32,
+}
+
+impl SdlAudioDevice {
+    fn open(
+        lib: Arc<SdlLibrary>,
+        shared: Arc<SdlShared>,
+    ) -> Result<(Self, Box<SdlCallbackState>, SdlAudioSpec), LocalPlaybackError> {
+        const SDL_INIT_AUDIO: u32 = 0x0000_0010;
+        const AUDIO_S16LSB: u16 = 0x8010;
+
+        let init_status = unsafe { (lib.init_sub_system)(SDL_INIT_AUDIO) };
+        if init_status != 0 {
+            eprintln!(
+                "local_player: SDL audio init failed: {}",
+                lib.error_string()
+            );
+            return Err(LocalPlaybackError::SpawnFailed);
+        }
+
+        let mut callback_state = Box::new(SdlCallbackState { shared });
+        let want = SdlAudioSpec {
+            freq: PCM_SAMPLE_RATE,
+            format: AUDIO_S16LSB,
+            channels: PCM_CHANNELS as u8,
+            silence: 0,
+            samples: 2048,
+            padding: 0,
+            size: 0,
+            callback: Some(sdl_audio_callback),
+            userdata: callback_state.as_mut() as *mut SdlCallbackState as *mut c_void,
+        };
+        let mut have = SdlAudioSpec {
+            freq: 0,
+            format: 0,
+            channels: 0,
+            silence: 0,
+            samples: 0,
+            padding: 0,
+            size: 0,
+            callback: None,
+            userdata: std::ptr::null_mut(),
+        };
+
+        let id = unsafe { (lib.open_audio_device)(std::ptr::null(), 0, &want, &mut have, 0) };
+        if id == 0 {
+            eprintln!(
+                "local_player: SDL open audio failed: {}",
+                lib.error_string()
+            );
+            unsafe { (lib.quit_sub_system)(SDL_INIT_AUDIO) };
+            return Err(LocalPlaybackError::SpawnFailed);
+        }
+
+        eprintln!(
+            "local_player: SDL audio opened freq={} channels={} samples={}",
+            have.freq, have.channels, have.samples
+        );
+        Ok((Self { lib, id }, callback_state, have))
+    }
+
+    fn pause(&self, paused: bool) {
+        unsafe {
+            (self.lib.pause_audio_device)(self.id, if paused { 1 } else { 0 });
+        }
+    }
+}
+
+impl Drop for SdlAudioDevice {
+    fn drop(&mut self) {
+        const SDL_INIT_AUDIO: u32 = 0x0000_0010;
+        unsafe {
+            (self.lib.pause_audio_device)(self.id, 1);
+            (self.lib.close_audio_device)(self.id);
+            (self.lib.quit_sub_system)(SDL_INIT_AUDIO);
+        }
+    }
+}
+
+struct SdlPlayback {
     ffmpeg_child: Option<Child>,
-    aplay_child: Option<Child>,
+    reader_thread: Option<JoinHandle<()>>,
+    shared: Arc<SdlShared>,
+    device: Option<SdlAudioDevice>,
+    _callback_state: Box<SdlCallbackState>,
+    sample_rate: i32,
+    channels: usize,
+}
+
+impl SdlPlayback {
+    fn start(file_path: &str) -> Result<Self, LocalPlaybackError> {
+        let lib = SdlLibrary::load()?;
+        let shared = Arc::new(SdlShared::new());
+        let (device, callback_state, obtained) =
+            SdlAudioDevice::open(Arc::clone(&lib), Arc::clone(&shared))?;
+        let (ffmpeg_child, stdout) = spawn_ffmpeg_pcm(file_path)?;
+        let reader_shared = Arc::clone(&shared);
+        let reader_thread = thread::spawn(move || read_pcm_stdout(stdout, reader_shared));
+
+        device.pause(false);
+        eprintln!(
+            "local_player: SDL pipeline ready ffmpeg_pid={} underruns=0",
+            ffmpeg_child.id()
+        );
+
+        Ok(Self {
+            ffmpeg_child: Some(ffmpeg_child),
+            reader_thread: Some(reader_thread),
+            shared,
+            device: Some(device),
+            _callback_state: callback_state,
+            sample_rate: obtained.freq.max(1),
+            channels: (obtained.channels as usize).max(1),
+        })
+    }
+
+    fn pause(&self) {
+        if let Some(device) = self.device.as_ref() {
+            device.pause(true);
+        }
+    }
+
+    fn resume(&self) {
+        if let Some(device) = self.device.as_ref() {
+            device.pause(false);
+        }
+    }
+
+    fn stop(&mut self) {
+        self.shared.stop_requested.store(true, Ordering::Relaxed);
+        if let Some(device) = self.device.take() {
+            device.pause(true);
+            drop(device);
+        }
+        if let Some(ref mut child) = self.ffmpeg_child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.ffmpeg_child = None;
+        if let Some(handle) = self.reader_thread.take() {
+            let _ = handle.join();
+        }
+        let underruns = self.shared.underruns.load(Ordering::Relaxed);
+        if underruns > 0 {
+            eprintln!("local_player: SDL underruns={underruns}");
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        if !self.shared.producer_eof.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.shared
+            .ring
+            .lock()
+            .map(|ring| ring.available_samples() == 0)
+            .unwrap_or(true)
+    }
+
+    fn position_ms(&self) -> i64 {
+        let samples = self.shared.output_samples.load(Ordering::Relaxed);
+        let frames = samples / self.channels.max(1) as u64;
+        ((frames * 1000) / self.sample_rate.max(1) as u64) as i64
+    }
+}
+
+impl Drop for SdlPlayback {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Manages local audio playback via ffmpeg-lite PCM decoding and SDL output.
+pub struct LocalPlayer {
+    session: Option<PlaybackSession>,
     current_entry: Option<FavoriteEntry>,
     playlist: Vec<FavoriteEntry>,
     playlist_index: usize,
@@ -40,8 +462,7 @@ pub struct LocalPlayer {
 impl LocalPlayer {
     pub fn new() -> Self {
         Self {
-            ffmpeg_child: None,
-            aplay_child: None,
+            session: None,
             current_entry: None,
             playlist: Vec::new(),
             playlist_index: 0,
@@ -141,29 +562,24 @@ impl LocalPlayer {
                 file_path
             );
 
-            match spawn_pipeline(&file_path) {
-                Ok((ffmpeg, aplay)) => {
-                    self.ffmpeg_child = Some(ffmpeg);
-                    self.aplay_child = Some(aplay);
+            match spawn_playback_session(&file_path) {
+                Ok(session) => {
+                    self.session = Some(session);
                     self.current_entry = Some(entry);
                     self.playlist_index = idx;
                     self.start_time = Instant::now();
                     self.paused = false;
                     self.paused_elapsed = Duration::ZERO;
                     eprintln!(
-                        "local_player: pipeline ready uri={} ffmpeg_pid={} aplay_pid={}",
+                        "local_player: pipeline ready uri={} backend={}",
                         self.current_entry
                             .as_ref()
                             .map(|entry| entry.uri.as_str())
                             .unwrap_or("unknown"),
-                        self.ffmpeg_child
+                        self.session
                             .as_ref()
-                            .map(|child| child.id())
-                            .unwrap_or_default(),
-                        self.aplay_child
-                            .as_ref()
-                            .map(|child| child.id())
-                            .unwrap_or_default()
+                            .map(|session| session.label())
+                            .unwrap_or("none")
                     );
                     return Ok(());
                 }
@@ -207,8 +623,9 @@ impl LocalPlayer {
         }
         self.paused = true;
         self.paused_elapsed += self.start_time.elapsed();
-        send_signal(&self.ffmpeg_child, libc::SIGSTOP);
-        send_signal(&self.aplay_child, libc::SIGSTOP);
+        if let Some(session) = self.session.as_mut() {
+            session.pause();
+        }
         eprintln!(
             "local_player: paused track={}",
             current_track_label(self.current_entry.as_ref())
@@ -219,8 +636,9 @@ impl LocalPlayer {
         if !self.paused {
             return;
         }
-        send_signal(&self.ffmpeg_child, libc::SIGCONT);
-        send_signal(&self.aplay_child, libc::SIGCONT);
+        if let Some(session) = self.session.as_mut() {
+            session.resume();
+        }
         self.paused = false;
         self.start_time = Instant::now();
         eprintln!(
@@ -299,16 +717,10 @@ impl LocalPlayer {
 
     /// Check if the current track has finished playing.
     pub fn is_finished(&mut self) -> bool {
-        if let Some(ref mut child) = self.ffmpeg_child {
-            match child.try_wait() {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(_) => true,
-            }
-        } else {
-            // No process means not playing
-            self.current_entry.is_some()
-        }
+        self.session
+            .as_mut()
+            .map(|session| session.is_finished())
+            .unwrap_or_else(|| self.current_entry.is_some())
     }
 
     /// Auto-advance to next track if current finished.
@@ -331,6 +743,13 @@ impl LocalPlayer {
     pub fn position_ms(&self) -> i64 {
         if self.current_entry.is_none() {
             return 0;
+        }
+        if let Some(position_ms) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.position_ms())
+        {
+            return position_ms;
         }
         let elapsed = if self.paused {
             self.paused_elapsed
@@ -358,21 +777,13 @@ impl LocalPlayer {
 
     fn stop_subprocess(&mut self) {
         // Resume first if paused, so SIGKILL can be delivered
-        if self.paused {
-            send_signal(&self.ffmpeg_child, libc::SIGCONT);
-            send_signal(&self.aplay_child, libc::SIGCONT);
+        if let Some(session) = self.session.as_mut() {
+            if self.paused {
+                session.resume();
+            }
+            session.stop();
         }
-
-        if let Some(ref mut child) = self.ffmpeg_child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        if let Some(ref mut child) = self.aplay_child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.ffmpeg_child = None;
-        self.aplay_child = None;
+        self.session = None;
     }
 }
 
@@ -389,16 +800,20 @@ fn local_playback_decoder_bin() -> &'static str {
 fn playback_spawn_error(component: &str, kind: std::io::ErrorKind) -> LocalPlaybackError {
     match (component, kind) {
         ("ffmpeg", std::io::ErrorKind::NotFound) => LocalPlaybackError::MissingDecoder,
-        ("aplay", std::io::ErrorKind::NotFound) => LocalPlaybackError::MissingAplay,
         _ => LocalPlaybackError::SpawnFailed,
     }
 }
 
-/// Spawn the ffmpeg → aplay pipeline for a given audio file.
-fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), LocalPlaybackError> {
+/// Spawn the SDL-backed playback session for a given audio file.
+fn spawn_playback_session(file_path: &str) -> Result<PlaybackSession, LocalPlaybackError> {
+    SdlPlayback::start(file_path).map(PlaybackSession::Sdl)
+}
+
+/// Spawn ffmpeg-lite as a PCM decoder. SDL is the only playback output.
+fn spawn_ffmpeg_pcm(file_path: &str) -> Result<(Child, ChildStdout), LocalPlaybackError> {
     let decoder = local_playback_decoder_bin();
     eprintln!(
-        "local_player: launching {} -> aplay for {}",
+        "local_player: launching {} -> SDL PCM for {}",
         decoder, file_path
     );
     let mut ffmpeg = Command::new(decoder)
@@ -430,40 +845,91 @@ fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), LocalPlaybackError>
         .take()
         .ok_or(LocalPlaybackError::MissingAudioPipe)?;
 
-    let aplay = match Command::new("aplay")
-        .args(["-f", "S16_LE", "-r", "44100", "-c", "2", "-q"])
-        .stdin(ffmpeg_stdout)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(aplay) => aplay,
-        Err(e) => {
-            let _ = ffmpeg.kill();
-            let _ = ffmpeg.wait();
-            eprintln!("local_player: aplay spawn failed: {e}");
-            return Err(playback_spawn_error("aplay", e.kind()));
+    Ok((ffmpeg, ffmpeg_stdout))
+}
+
+unsafe extern "C" fn sdl_audio_callback(userdata: *mut c_void, stream: *mut u8, len: c_int) {
+    if userdata.is_null() || stream.is_null() || len <= 0 {
+        return;
+    }
+
+    let state = &mut *(userdata as *mut SdlCallbackState);
+    let output = std::slice::from_raw_parts_mut(stream as *mut i16, len as usize / 2);
+    let read = match state.shared.ring.try_lock() {
+        Ok(mut ring) => ring.read_samples(output),
+        Err(_) => {
+            output.fill(0);
+            state.shared.underruns.fetch_add(1, Ordering::Relaxed);
+            0
         }
     };
-    eprintln!("local_player: aplay started pid={}", aplay.id());
+    if read < output.len() {
+        state.shared.underruns.fetch_add(1, Ordering::Relaxed);
+    }
+    state
+        .shared
+        .output_samples
+        .fetch_add(output.len() as u64, Ordering::Relaxed);
+}
 
-    Ok((ffmpeg, aplay))
+fn read_pcm_stdout(mut stdout: ChildStdout, shared: Arc<SdlShared>) {
+    let mut bytes = [0u8; 8192];
+    let mut pending_byte = None;
+    let mut samples = Vec::with_capacity(bytes.len() / 2 + 1);
+
+    loop {
+        if shared.stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let read = match stdout.read(&mut bytes) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) => {
+                eprintln!("local_player: ffmpeg PCM read error: {e}");
+                break;
+            }
+        };
+
+        samples.clear();
+        let mut idx = 0;
+        if let Some(first) = pending_byte.take() {
+            samples.push(i16::from_le_bytes([first, bytes[0]]));
+            idx = 1;
+        }
+        while idx + 1 < read {
+            samples.push(i16::from_le_bytes([bytes[idx], bytes[idx + 1]]));
+            idx += 2;
+        }
+        if idx < read {
+            pending_byte = Some(bytes[idx]);
+        }
+
+        write_samples_blocking(&shared, &samples);
+    }
+
+    shared.producer_eof.store(true, Ordering::Relaxed);
+}
+
+fn write_samples_blocking(shared: &Arc<SdlShared>, samples: &[i16]) {
+    let mut offset = 0;
+    while offset < samples.len() && !shared.stop_requested.load(Ordering::Relaxed) {
+        let written = shared
+            .ring
+            .lock()
+            .map(|mut ring| ring.write_samples(&samples[offset..]))
+            .unwrap_or(0);
+        offset += written;
+        if written == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 fn current_track_label(entry: Option<&FavoriteEntry>) -> String {
     entry
         .map(|entry| format!("{} - {}", entry.artist, entry.name))
         .unwrap_or_else(|| "none".to_string())
-}
-
-/// Send a signal to a child process.
-fn send_signal(child: &Option<Child>, signal: libc::c_int) {
-    if let Some(ref child) = child {
-        let pid = child.id() as libc::pid_t;
-        unsafe {
-            libc::kill(pid, signal);
-        }
-    }
 }
 
 /// Fisher-Yates shuffle using a simple xorshift PRNG.
@@ -491,6 +957,32 @@ mod tests {
     use crate::constants::FFMPEG_TRANSCODER_BIN;
 
     #[test]
+    fn pcm_ring_buffer_reads_silence_when_empty() {
+        let mut ring = PcmRingBuffer::new(4);
+        let mut out = [7i16; 6];
+
+        let read = ring.read_samples(&mut out);
+
+        assert_eq!(read, 0);
+        assert_eq!(out, [0; 6]);
+    }
+
+    #[test]
+    fn pcm_ring_buffer_wraps_without_reallocating() {
+        let mut ring = PcmRingBuffer::new(4);
+
+        assert_eq!(ring.write_samples(&[1, 2, 3]), 3);
+        let mut first = [0i16; 2];
+        assert_eq!(ring.read_samples(&mut first), 2);
+        assert_eq!(first, [1, 2]);
+        assert_eq!(ring.write_samples(&[4, 5, 6]), 3);
+
+        let mut second = [0i16; 4];
+        assert_eq!(ring.read_samples(&mut second), 4);
+        assert_eq!(second, [3, 4, 5, 6]);
+    }
+
+    #[test]
     fn local_playback_decoder_defaults_to_bundled_ffmpeg_lite() {
         assert_eq!(local_playback_decoder_bin(), FFMPEG_TRANSCODER_BIN);
     }
@@ -499,11 +991,5 @@ mod tests {
     fn missing_decoder_error_uses_short_user_notice() {
         let err = playback_spawn_error("ffmpeg", std::io::ErrorKind::NotFound);
         assert_eq!(err.notice(), "Missing ffmpeg");
-    }
-
-    #[test]
-    fn missing_aplay_error_uses_short_user_notice() {
-        let err = playback_spawn_error("aplay", std::io::ErrorKind::NotFound);
-        assert_eq!(err.notice(), "Missing aplay");
     }
 }

@@ -32,6 +32,8 @@ pub enum InputAction {
     PlaylistSelect,
     PlaylistDelete,
     LibraryChanged,
+    ImportProgress { completed: usize, total: usize },
+    ImportFinished,
     SpotifyActivated,
     SpotifyDeactivated,
     SpotifyTrackChanged,

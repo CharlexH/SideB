@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.12`
+Latest release: `v1.1.0`
 
-- Local cover art can now be added to already-imported tracks by placing a same-name image next to the MP3 in `data/music/`
-- Same-name cover sidecars now match `.jpg`, `.jpeg`, and `.png` case-insensitively
-- New manual uploads still use `data/imports/` so SideB can create the managed library entry
+- Local playback now uses SideB's SDL audio callback with bundled `ffmpeg-lite` PCM decoding, replacing the old `aplay` subprocess output path.
+- Downloads now persist pending work, resume automatically on startup, show clearer progress, and surface short failure notices for cookies, network, storage, YouTube challenge, and missing runtime tools.
+- Local MP3 import now ignores macOS metadata files, supports album-folder `cover.*`/`folder.*` art, and backfills missing covers for existing managed tracks.
 
 ## Screenshots 📸
 
@@ -62,7 +62,7 @@ The app consists of two components:
 
 ### Offline playback pipeline
 
-When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is played back through the bundled `ffmpeg-lite → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
+When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is decoded by bundled `ffmpeg-lite` into PCM and played through SideB's SDL audio callback. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
 
 For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art with the device's system ffmpeg when available, and adds the track to `FAV LIST` as a managed local item.
 
@@ -123,7 +123,7 @@ Stock    -> /mnt/SDCARD/Apps/SideB/data/imports/
 CrossMix -> /mnt/SDCARD/Apps/SideB/data/imports/
 ```
 
-SideB scans that folder recursively at startup and while running. Imported files are moved into `data/music/`, then added to `FAV LIST` and treated like downloaded local tracks.
+SideB scans that folder recursively at startup and while running. Imported files are moved into `data/music/`, then added to `FAV LIST` and treated like downloaded local tracks. macOS metadata such as `__MACOSX/`, hidden folders, and `._*.mp3` files is ignored.
 
 #### Cover art for local uploads
 
@@ -137,6 +137,17 @@ data/imports/My Album/
   Artist - Song.jpg
 ```
 
+For album subfolders, `cover.jpg`, `cover.jpeg`, `cover.png`, `folder.jpg`, `folder.jpeg`, and `folder.png` are also supported as folder-level covers:
+
+```text
+data/imports/My Album/
+  01 First Song.mp3
+  02 Second Song.mp3
+  cover.jpg
+```
+
+Folder-level covers only apply inside import subfolders such as `data/imports/My Album/`. `data/imports/cover.jpg` is not treated as a root import default, and `data/music/cover.jpg` is not treated as a global library cover.
+
 If a track was already imported without cover art, place the same-name image next to the managed MP3 in `data/music/`:
 
 ```text
@@ -145,18 +156,31 @@ data/music/
   Artist - Song.jpg
 ```
 
-SideB scans for these existing-library covers at startup and while running. Folder-level names such as `cover.jpg` or `folder.jpg` are not matched automatically; the image filename needs to match the MP3 filename stem.
+SideB scans for these existing-library covers at startup and while running. In `data/music/`, the image filename still needs to match the MP3 filename stem.
 
 Notes:
 
 - Current manual import support is `MP3` only.
-- Embedded cover art is preferred. If no embedded cover exists, SideB will try to use a same-name sidecar image next to the MP3 during import.
+- Embedded cover art is preferred. If no embedded cover exists, SideB tries a same-name sidecar image, then an album-subfolder `cover.*`, then `folder.*`.
 - Press **X** once to show the remove confirmation, then press **X** again to actually remove the track from favorites.
 - If you remove the track that is currently playing locally, SideB keeps the managed file until playback moves away from that track. If you favorite it again before switching tracks, the cached file is preserved.
 
 ## Troubleshooting: Downloads Failing
 
-If downloads fail with `Sign in to confirm you're not a bot` in the log (`/tmp/sideb.log`), YouTube needs valid cookies.
+When a background download finally fails, SideB shows a short notice on the device and writes details to `/tmp/sideb.log`.
+
+| Notice | Common log pattern | Meaning | Action |
+|--------|--------------------|---------|--------|
+| `Cookie check failed` | `Sign in to confirm you're not a bot`, `Use --cookies` | YouTube wants valid account cookies | Export Firefox cookies to `data/yt-dlp-cookies.txt` |
+| `YouTube challenge` | `Signature solving failed`, `n challenge`, `GVS PO Token`, `PO Token` | YouTube changed or gated this format/client path | Retry later, update SideB/yt-dlp in the next package, or try another track |
+| `Network error` | DNS, timeout, TLS, SSL, `Network is unreachable` | Device network, Wi-Fi, certificate, proxy, or routing issue | Check device Wi-Fi/router/proxy; the device does not inherit your computer proxy automatically |
+| `Storage full` | `No space left on device`, `PyInstaller`, `failed to extract`, `/tmp` | Temporary extraction or SD-card storage failed | Free space, restart SideB to clear `/tmp/sideb-tmp`, then retry |
+| `Missing yt-dlp` | `yt-dlp` missing or permission denied | Runtime payload is missing or not executable | Reinstall the full release zip |
+| `Audio tool failed` | `ffmpeg`, `ffprobe`, `ffmpeg-location`, `transcoder`, `libmp3lame`, `s16le` | Bundled audio transcoder path or codec support is missing or broken | Reinstall the full release zip and verify `ffmpeg-lite` is present |
+| `No audio match` | `Requested format is not available`, duration mismatch | Candidate audio did not match the Spotify track | Try another track or retry later |
+| `Download failed` | Other extractor failure | Unknown download failure | Check `/tmp/sideb.log` and open an issue with the log snippet |
+
+For cookie-related failures:
 
 **Use Firefox** (recommended — Chrome rotates cookies on export, making them expire immediately):
 
@@ -178,9 +202,11 @@ Restart SideB and pending downloads will resume automatically.
 
 ```bash
 git clone https://github.com/CharlexH/SideB.git
-cd SideB/spotify-ui-rs
-cargo build --release --target aarch64-unknown-linux-musl
-cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
+cd SideB
+rustup target add aarch64-unknown-linux-gnu
+brew install zig
+cargo install cargo-zigbuild --locked
+./scripts/package.sh
 ```
 
 ### Required runtime files (not tracked in git)
@@ -205,6 +231,8 @@ This produces:
 - `dist/SideB-<version>-nextui.zip`
 - `dist/SideB-<version>-stock.zip`
 - `dist/SideB-<version>-crossmix.zip`
+
+`scripts/package.sh` also checks release metadata before building: `Cargo.toml`, `pak.json` version, `pak.json` `release_filename`, `pak.json` changelog, and README release labels must all agree. After packaging, it verifies the three platform zips and required runtime payload entries.
 
 Archive layouts:
 
@@ -240,7 +268,13 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.12`
+Before publishing, verify the GitHub release assets after upload:
+
+```bash
+./scripts/check_github_release_assets.sh v<version>
+```
+
+Current release tag: `v1.1.0`
 
 ## Repo Layout 🗂️
 
@@ -251,6 +285,8 @@ package/SideB.pak/data/         Runtime config copied into release packages
 package/SideB.pak/resources/    UI images, icons, and fonts
 packaging/                      Platform wrappers and release metadata
 scripts/package.sh              Multi-platform release packager
+scripts/check_release_metadata.sh Release metadata consistency gate
+scripts/check_github_release_assets.sh GitHub release asset gate
 ```
 
 ## Configuration ⚙️
