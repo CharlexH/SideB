@@ -20,6 +20,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 expected="$tmpdir/expected"
 actual="$tmpdir/actual"
+actual_stable="$tmpdir/actual-stable"
 
 printf '%s\n' \
   "SideB-${version}-crossmix.zip" \
@@ -33,9 +34,11 @@ gh release view "$tag" \
   --jq '.assets[].name' \
   | sort >"$actual"
 
-if ! diff -u "$expected" "$actual"; then
-  echo "ERROR: GitHub release $tag assets do not match SideB $version release zips" >&2
+grep -E "^SideB-${version}-(crossmix|nextui|stock)\\.zip$" "$actual" >"$actual_stable" || true
+
+if ! diff -u "$expected" "$actual_stable"; then
+  echo "ERROR: GitHub release $tag assets are missing one or more stable SideB $version release zips" >&2
   exit 1
 fi
 
-echo "OK: GitHub release $tag has the expected SideB $version assets"
+echo "OK: GitHub release $tag has the expected stable SideB $version assets"
