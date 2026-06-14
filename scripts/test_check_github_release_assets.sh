@@ -20,6 +20,8 @@ if [ "${FAKE_GH_MISSING_CROSSMIX:-0}" = "1" ]; then
 else
   printf '%s\n' \
     SideB-1.1.0-crossmix.zip \
+    SideB-1.1.0-knulli-candidate.zip \
+    SideB-1.1.0-muos-candidate.muxapp \
     SideB-1.1.0-nextui.zip \
     SideB-1.1.0-stock.zip
 fi
@@ -33,4 +35,4 @@ if FAKE_GH_MISSING_CROSSMIX=1 PATH="$fake_bin:$PATH" "$check_script" v1.1.0 >/de
   exit 1
 fi
 
-echo "OK: GitHub asset checker enforces the three release zip names"
+echo "OK: GitHub asset checker enforces the three stable release zip names while allowing Candidate assets"

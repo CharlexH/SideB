@@ -171,6 +171,7 @@ validate_zip_layout() {
 validate_release_packages() {
   local expected_asset_count
   local pak_release_filename
+  local stable_asset
   pak_release_filename=$(sed -n 's/^[[:space:]]*"release_filename":[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_root/pak.json" | head -n 1)
 
   if [ "$pak_release_filename" != "SideB-${version}-nextui.zip" ]; then
@@ -194,10 +195,20 @@ validate_release_packages() {
   assert_zip_no_entry "$dist_root/SideB-${version}-crossmix.zip" "launch.sh"
   assert_zip_entry "$dist_root/SideB-${version}-crossmix.zip" "Apps/SideB/config.json"
 
-  expected_asset_count=$(find "$dist_root" -maxdepth 1 -type f -name "SideB-${version}-*.zip" | wc -l | tr -d ' ')
+  expected_asset_count=0
+  for stable_asset in \
+    "SideB-${version}-nextui.zip" \
+    "SideB-${version}-stock.zip" \
+    "SideB-${version}-crossmix.zip"
+  do
+    [ -f "$dist_root/$stable_asset" ] && expected_asset_count=$((expected_asset_count + 1))
+  done
   if [ "$expected_asset_count" != "3" ]; then
     echo "ERROR: expected exactly 3 release zips for $version, found $expected_asset_count" >&2
-    find "$dist_root" -maxdepth 1 -type f -name "SideB-${version}-*.zip" -print >&2
+    find "$dist_root" -maxdepth 1 -type f \
+      \( -name "SideB-${version}-nextui.zip" \
+      -o -name "SideB-${version}-stock.zip" \
+      -o -name "SideB-${version}-crossmix.zip" \) -print >&2
     exit 1
   fi
 

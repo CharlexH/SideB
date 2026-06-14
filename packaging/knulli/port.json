@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "name": "SideB-__VERSION__-knulli-candidate.zip",
+  "items": [
+    "SideB.sh",
+    "sideb"
+  ],
+  "items_opt": null,
+  "attr": {
+    "title": "SideB Candidate",
+    "desc": "Retro cassette-style music player with Spotify Connect, offline favorites, and local MP3 playback. Candidate package: not validated on KNULLI hardware yet.",
+    "inst": "Ready to run as a Candidate build. Device validation is required before Beta or Stable support.",
+    "genres": [
+      "other"
+    ],
+    "porter": [
+      "CharlexH"
+    ],
+    "image": {},
+    "rtr": true,
+    "runtime": null,
+    "reqs": [],
+    "arch": [
+      "aarch64"
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./SideB.sh</path>
+    <name>SideB Candidate</name>
+    <desc>Retro cassette-style music player for TrimUI Brick with Spotify Connect, offline favorites, and local MP3 playback. This KNULLI package is a Candidate build and still needs device validation.</desc>
+    <developer>CharlexH</developer>
+    <publisher>CharlexH</publisher>
+    <genre>Music</genre>
+    <image>./screenshot.png</image>
+  </game>
+</gameList>
