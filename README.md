@@ -88,13 +88,11 @@ This software is provided as-is for educational and personal use. It is not inte
 
 ## Platform Support
 
-- Stable: NextUI, Stock OS, CrossMix OS
-- Candidate: KNULLI, muOS
+Stable builds are available for NextUI, Stock OS, and CrossMix OS.
 
-Candidate packages are installable test builds for device validation. They are
-not supported releases until real-device proof confirms launch, display, input,
-Spotify Connect visibility, local playback, and clean exit back to the OS
-frontend.
+KNULLI and muOS builds are Candidate test packages. Use them only if you can
+try SideB on real hardware and share logs or screenshots. They are not official
+support yet.
 
 ## Controls 🎮
 
@@ -230,7 +228,7 @@ cargo install cargo-zigbuild --locked
 
 ## Package Releases 📦
 
-Build all release archives:
+Build Stable packages:
 
 ```bash
 ./scripts/package.sh
@@ -242,9 +240,7 @@ This produces:
 - `dist/SideB-<version>-stock.zip`
 - `dist/SideB-<version>-crossmix.zip`
 
-`scripts/package.sh` also checks release metadata before building: `Cargo.toml`, `pak.json` version, `pak.json` `release_filename`, `pak.json` changelog, and README release labels must all agree. After packaging, it verifies the three platform zips and required runtime payload entries.
-
-Build experimental Candidate packages:
+Build Candidate test packages:
 
 ```bash
 ./scripts/package_candidates.sh
@@ -255,29 +251,9 @@ This produces:
 - `dist/SideB-<version>-knulli-candidate.zip`
 - `dist/SideB-<version>-muos-candidate.muxapp`
 
-Candidate artifacts are not part of the Stable release gate. They are intended
-for testers who can provide firmware version, package hash, install path,
-runtime logs, and on-device proof. Use the checklist in
-[`packaging/candidate-test-checklist.md`](packaging/candidate-test-checklist.md)
-when reporting Candidate results.
-
-Archive layouts:
-
-- `nextui`: pak contents such as `launch.sh`, `sideb`, `resources/...`, and `data/...`; the NextUI Pak Store extracts this archive into `Tools/tg5040/SideB.pak/`
-- `stock`: `Apps/SideB/...`
-- `crossmix`: `Apps/SideB/...`
-- `knulli-candidate`: PortMaster-style `sideb/...` tree with `SideB.sh`,
-  PortMaster metadata, and a `sideb/` payload directory
-- `muos-candidate`: `.muxapp` archive with a `SideB/...` application tree,
-  `mux_launch.sh`, muOS metadata, and the SideB payload
-
-Supported in this release:
-
-- `NextUI` — validated on device
-- `Stock` — package layout and launcher verified
-- `CrossMix` — package layout and launcher verified
-- `KNULLI` — Candidate package only; not validated on device
-- `muOS` — Candidate package only; not validated on device
+If you test KNULLI or muOS, include firmware version, install path, logs, and
+the package hash. The short checklist is in
+[`packaging/candidate-test-checklist.md`](packaging/candidate-test-checklist.md).
 
 ## Deploy 🚀
 
@@ -294,26 +270,24 @@ muOS     -> Candidate only: copy the .muxapp archive to ARCHIVE and install it w
 On Stable platforms, launch **SideB** from the TrimUI app menu, then select
 **TrimUI Brick** from Spotify Connect on another device.
 
-On KNULLI Candidate builds, launch **SideB Candidate** from Ports or
-PortMaster after extracting the archive. On muOS Candidate builds, launch
-**SideB Candidate** from Applications after installing the `.muxapp` through
-Archive Manager.
+On Candidate builds, launch **SideB Candidate** from Ports/PortMaster on KNULLI
+or from Applications on muOS.
 
 ## GitHub Release 🏷️
 
-Public releases attach three installable archives:
+Public releases attach the three Stable archives:
 
 - `SideB-<version>-nextui.zip`
 - `SideB-<version>-stock.zip`
 - `SideB-<version>-crossmix.zip`
 
-Experimental Candidate releases may also attach:
+They may also include Candidate test packages:
 
 - `SideB-<version>-knulli-candidate.zip`
 - `SideB-<version>-muos-candidate.muxapp`
+- `candidate-test-checklist.md`
 
-KNULLI and muOS Candidate builds are unvalidated test packages. They need
-tester reports before Beta or Stable support.
+KNULLI and muOS need real-device reports before they move to Beta or Stable.
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
