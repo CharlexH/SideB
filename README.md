@@ -1,12 +1,8 @@
 # SideB
 
-SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
+SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, local MP3 playback, and USB DAC output.
 
 Latest release: `v1.2.1`
-
-- USB DAC output is now supported for Spotify streaming and local playback when the OS enumerates the DAC as an ALSA device.
-- Audio hot-plug routing now falls back to internal audio when a DAC is removed, then switches back to the DAC after it is reinserted.
-- Spotify streaming now uses SideB's SDL audio path, so hardware volume control stays consistent across internal audio and USB DAC output.
 
 ## Screenshots 📸
 
@@ -38,21 +34,51 @@ Latest release: `v1.2.1`
 ### Spotify streaming 🎧
 
 - Turns the TrimUI Brick into a Spotify Connect receiver on your local network
+- Appears in Spotify Connect as **TrimUI Brick**
 - Shows cover art, playback state, and cassette animation directly on `/dev/fb0`
 - Supports hardware controls for play, pause, skip, volume, favorites, and list navigation
-- Supports USB DAC output through SideB's SDL audio path when the OS exposes the DAC as an ALSA card
+- Keeps Spotify playback state synchronized with the fullscreen cassette UI
+- Uses SideB's SDL audio path instead of a separate system playback command
 
 ### Offline FAV list 💾
 
 - Save the current track with `X`
 - Browse and manage favorites in the fullscreen `FAV LIST`
 - Play downloaded favorites locally with shuffle, previous, and next track controls
+- Download favorite tracks for personal offline playback
+- Resume pending downloads automatically after restart
+- Show download progress and short failure notices for network, storage, cookie, YouTube challenge, and missing-tool errors
+- Validate downloaded audio duration against Spotify metadata to reduce mismatched tracks
+
+### Audio output and USB DACs 🔊
+
+- Outputs both Spotify streaming audio and local playback through SideB's SDL audio callback
+- Supports USB DAC output when the OS exposes the DAC as an ALSA card (`v1.2.1+`)
+- Prefers a connected USB DAC automatically, then falls back to internal audio when the DAC is removed
+- Switches back to the DAC after it is reinserted and enumerated by the OS
+- Keeps SideB volume controls consistent across internal audio and USB DAC output
+- Uses bundled `ffmpeg-lite` for local PCM decoding so playback does not depend on system `ffmpeg` or `aplay`
 
 ### Local uploads 📥
 
 - Drop MP3 files into `data/imports/`
 - SideB imports tags and cover art automatically
 - Imported tracks are added to `FAV LIST` and behave like local favorites
+- Supports embedded cover art plus same-folder `cover.*` and `folder.*` image files
+- Ignores macOS hidden metadata files during import
+
+### Device integration 🎮
+
+- Renders directly to the TrimUI framebuffer at `/dev/fb0`
+- Reads hardware controls from `/dev/input`
+- Keeps the device awake while playback, imports, or downloads are active
+- Restores CPU scaling state and exits cleanly back to the OS frontend
+- Bundles runtime helpers for reproducible release packages
+
+### Platform packages 📦
+
+- Stable packages are available for NextUI, Stock OS, and CrossMix OS
+- KNULLI and muOS packages are Candidate-only test builds until real-device evidence promotes them
 
 ## How It Works 🧠
 
