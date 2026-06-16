@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.1.0`
+Latest release: `v1.2.1`
 
-- Local playback now uses SideB's SDL audio callback with bundled `ffmpeg-lite` PCM decoding, replacing the old `aplay` subprocess output path.
-- Downloads now persist pending work, resume automatically on startup, show clearer progress, and surface short failure notices for cookies, network, storage, YouTube challenge, and missing runtime tools.
-- Local MP3 import now ignores macOS metadata files, supports album-folder `cover.*`/`folder.*` art, and backfills missing covers for existing managed tracks.
+- USB DAC output is now supported for Spotify streaming and local playback when the OS enumerates the DAC as an ALSA device.
+- Audio hot-plug routing now falls back to internal audio when a DAC is removed, then switches back to the DAC after it is reinserted.
+- Spotify streaming now uses SideB's SDL audio path, so hardware volume control stays consistent across internal audio and USB DAC output.
 
 ## Screenshots 📸
 
@@ -40,6 +40,7 @@ Latest release: `v1.1.0`
 - Turns the TrimUI Brick into a Spotify Connect receiver on your local network
 - Shows cover art, playback state, and cassette animation directly on `/dev/fb0`
 - Supports hardware controls for play, pause, skip, volume, favorites, and list navigation
+- Supports USB DAC output through SideB's SDL audio path when the OS exposes the DAC as an ALSA card
 
 ### Offline FAV list 💾
 
@@ -63,6 +64,10 @@ The app consists of two components:
 ### Offline playback pipeline
 
 When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is decoded by bundled `ffmpeg-lite` into PCM and played through SideB's SDL audio callback. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
+
+### Audio output and USB DACs
+
+SideB outputs both Spotify streaming audio and local playback through its SDL audio callback. If a USB DAC is connected and the OS exposes it as an ALSA card, SideB prefers that DAC automatically. During playback, unplugging the DAC falls back to internal audio; reinserting it switches playback back to the DAC after the OS enumerates it again. SideB's volume controls apply consistently across internal audio and USB DAC output.
 
 For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art with the device's system ffmpeg when available, and adds the track to `FAV LIST` as a managed local item.
 
@@ -297,7 +302,7 @@ Before publishing, verify the GitHub release assets after upload:
 ./scripts/check_github_release_assets.sh v<version>
 ```
 
-Current release tag: `v1.1.0`
+Current release tag: `v1.2.1`
 
 ## Repo Layout 🗂️
 
@@ -319,15 +324,18 @@ Main config: [`package/SideB.pak/data/config.yml`](package/SideB.pak/data/config
 ```yaml
 device_name: "TrimUI Brick"
 device_type: "speaker"
-audio_backend: "alsa"
-audio_device: "default"
+audio_backend: "pipe"
+audio_output_pipe: "/tmp/sideb-spotify.pcm"
+audio_output_pipe_format: "s16le"
+external_volume: true
 bitrate: 160
 volume_steps: 100
 initial_volume: 80
 zeroconf_enabled: true
 ```
 
-The UI communicates with `go-librespot` at `http://127.0.0.1:3678`.
+The UI communicates with `go-librespot` at `http://127.0.0.1:3678` and consumes
+Spotify PCM from the pipe backend through SideB's SDL audio output.
 
 ## Credits & Third-Party Software 🙏
 

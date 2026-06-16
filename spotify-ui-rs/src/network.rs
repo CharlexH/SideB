@@ -884,6 +884,34 @@ mod tests {
     }
 
     #[test]
+    fn stopped_event_clears_stale_spotify_state() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let render_state = empty_render_state();
+        let (cmd_tx, cmd_rx) = test_cmd_channel();
+        {
+            let mut st = state.lock().unwrap();
+            st.set_mode(crate::mode::AppMode::Spotify);
+            st.current_track_uri = "spotify:track:active".to_string();
+            st.track_name = "Active".to_string();
+            st.artist_name = "Artist".to_string();
+            st.connected = true;
+            st.paused = false;
+            st.spotify_was_active = true;
+        }
+
+        handle_event(make_event("stopped", None), &state, &render_state, &cmd_tx);
+
+        let st = state.lock().unwrap();
+        assert!(st.current_track_uri.is_empty());
+        assert!(st.track_name.is_empty());
+        assert!(st.paused);
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(crate::mode::InputAction::SpotifyDeactivated)
+        );
+    }
+
+    #[test]
     fn stopped_status_snapshot_clears_stale_track_state() {
         let mut state = AppState::new();
         state.current_track_uri = "spotify:track:stale".to_string();

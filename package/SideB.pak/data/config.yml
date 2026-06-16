@@ -1,7 +1,9 @@
 device_name: "TrimUI Brick"
 device_type: "speaker"
-audio_backend: "alsa"
-audio_device: "default"
+audio_backend: "pipe"
+audio_output_pipe: "/tmp/sideb-spotify.pcm"
+audio_output_pipe_format: "s16le"
+external_volume: true
 bitrate: 160
 volume_steps: 100
 initial_volume: 80

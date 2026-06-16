@@ -36,7 +36,7 @@ use download::{DownloadManager, DownloadRequest};
 use favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
 use font::FontSet;
 use framebuffer::Framebuffer;
-use local_player::{LocalPlaybackError, LocalPlayer};
+use local_player::{local_volume_percent, LocalPlaybackError, LocalPlayer, SpotifyPipeAudio};
 use mode::{AppMode, InputAction};
 use paths::{app_paths, detect_paths, init_paths};
 use render::RenderState;
@@ -128,6 +128,10 @@ fn main() {
         &app_paths().favorites_path,
     )));
     let local_player = Arc::new(Mutex::new(LocalPlayer::new()));
+    let spotify_audio = Arc::new(SpotifyPipeAudio::start(
+        Arc::clone(&quit),
+        current_local_volume_percent(&app_state),
+    ));
 
     let cover_updates = local_import::sync_existing_music_covers(&favorites);
     if cover_updates > 0 {
@@ -241,6 +245,7 @@ fn main() {
     let cmd_render_state = Arc::clone(&render_state);
     let cmd_favorites = Arc::clone(&favorites);
     let cmd_local_player = Arc::clone(&local_player);
+    let cmd_spotify_audio = Arc::clone(&spotify_audio);
     let cmd_pending_removals = Arc::clone(&pending_removals);
     let cmd_quit = Arc::clone(&quit);
     let _cmd_handle = std::thread::Builder::new()
@@ -252,12 +257,28 @@ fn main() {
                 cmd_render_state,
                 cmd_favorites,
                 cmd_local_player,
+                cmd_spotify_audio,
                 cmd_pending_removals,
                 download_manager,
                 cmd_quit,
             );
         })
         .expect("spawn command processor thread");
+
+    // Keep the Spotify pipe output volume in sync with go-librespot volume events.
+    let volume_state = Arc::clone(&app_state);
+    let volume_spotify_audio = Arc::clone(&spotify_audio);
+    let volume_quit = Arc::clone(&quit);
+    let _volume_handle = std::thread::Builder::new()
+        .name("volume-sync".into())
+        .spawn(move || {
+            while !volume_quit.load(Ordering::Relaxed) {
+                volume_spotify_audio
+                    .set_volume_percent(current_local_volume_percent(&volume_state));
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })
+        .expect("spawn volume sync thread");
 
     // Spawn local import monitor thread
     let import_favorites = Arc::clone(&favorites);
@@ -386,6 +407,7 @@ fn command_processor(
     render_state: Arc<Mutex<RenderState>>,
     favorites: Arc<Mutex<FavoritesManager>>,
     local_player: Arc<Mutex<LocalPlayer>>,
+    spotify_audio: Arc<SpotifyPipeAudio>,
     pending_removals: Arc<Mutex<HashMap<String, FavoriteEntry>>>,
     download_manager: DownloadManager,
     quit: Arc<AtomicBool>,
@@ -406,6 +428,7 @@ fn command_processor(
 
                 match mode {
                     AppMode::Spotify if !paused => {
+                        spotify_audio.suspend();
                         network::api_post("/player/pause");
                     }
                     AppMode::Local => {
@@ -579,6 +602,7 @@ fn command_processor(
 
             InputAction::TogglePlayPause => {
                 app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
+                let volume_percent = current_local_volume_percent(&app_state);
                 let mut player = local_player.lock().unwrap();
                 if player.is_active() {
                     player.toggle_pause();
@@ -586,10 +610,12 @@ fn command_processor(
                     app_state.lock().unwrap().set_paused(paused);
                 } else {
                     // Player not started — start shuffled playback from displayed track
+                    spotify_audio.suspend();
                     network::api_post("/player/pause");
                     let current_uri = app_state.lock().unwrap().current_track_uri.clone();
                     let downloaded = favorites.lock().unwrap().downloaded_entries();
                     if !downloaded.is_empty() {
+                        player.set_volume_percent(volume_percent);
                         match player.start_shuffled_with_first(downloaded, &current_uri) {
                             Ok(()) => {
                                 sync_local_track_to_app(&player, &app_state, &favorites);
@@ -615,7 +641,9 @@ fn command_processor(
             InputAction::NextTrack => {
                 app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
+                let volume_percent = current_local_volume_percent(&app_state);
                 let mut player = local_player.lock().unwrap();
+                player.set_volume_percent(volume_percent);
                 player.refresh_playlist(downloaded);
                 match player.next() {
                     Ok(()) => {
@@ -636,7 +664,9 @@ fn command_processor(
             InputAction::PrevTrack => {
                 app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
+                let volume_percent = current_local_volume_percent(&app_state);
                 let mut player = local_player.lock().unwrap();
+                player.set_volume_percent(volume_percent);
                 player.refresh_playlist(downloaded);
                 match player.prev() {
                     Ok(()) => {
@@ -655,17 +685,17 @@ fn command_processor(
             }
 
             InputAction::VolumeUp => {
-                // For local playback, we still use the system ALSA mixer
-                network::api_post_volume(5);
+                adjust_local_volume(&app_state, &local_player, &spotify_audio, 5);
             }
 
             InputAction::VolumeDown => {
-                network::api_post_volume(-5);
+                adjust_local_volume(&app_state, &local_player, &spotify_audio, -5);
             }
 
             InputAction::StartLocalPlayback => {
                 app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 // Pause Spotify first to prevent audio overlap
+                spotify_audio.suspend();
                 network::api_post("/player/pause");
 
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
@@ -675,7 +705,9 @@ fn command_processor(
                     continue;
                 }
 
+                let volume_percent = current_local_volume_percent(&app_state);
                 let mut player = local_player.lock().unwrap();
+                player.set_volume_percent(volume_percent);
                 match player.start_shuffled(downloaded) {
                     Ok(()) => {
                         sync_local_track_to_app(&player, &app_state, &favorites);
@@ -760,9 +792,12 @@ fn command_processor(
                     if entry.downloaded && entry.file_path.is_some() {
                         app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                         // Pause Spotify first to prevent audio overlap
+                        spotify_audio.suspend();
                         network::api_post("/player/pause");
 
+                        let volume_percent = current_local_volume_percent(&app_state);
                         let mut player = local_player.lock().unwrap();
+                        player.set_volume_percent(volume_percent);
                         // Build a playlist from all downloaded entries
                         let downloaded = favorites.lock().unwrap().downloaded_entries();
                         let playback_result = if player.is_active() {
@@ -875,6 +910,7 @@ fn command_processor(
             }
 
             InputAction::SpotifyActivated => {
+                spotify_audio.resume();
                 if app_state.lock().unwrap().screen_locked {
                     screen_backlight.unlock();
                     app_state.lock().unwrap().set_screen_locked(false);
@@ -1031,10 +1067,8 @@ fn select_local_restore_target<'a>(
     downloaded: &'a [FavoriteEntry],
     remembered_uri: Option<&str>,
 ) -> Option<&'a FavoriteEntry> {
-    let remembered_uri = remembered_uri?;
-    downloaded
-        .iter()
-        .find(|entry| entry.uri == remembered_uri)
+    remembered_uri
+        .and_then(|uri| downloaded.iter().find(|entry| entry.uri == uri))
         .or_else(|| downloaded.first())
 }
 
@@ -1210,6 +1244,28 @@ fn refresh_library_state(
     }
 }
 
+fn current_local_volume_percent(app_state: &Arc<Mutex<AppState>>) -> u32 {
+    let st = app_state.lock().unwrap();
+    local_volume_percent(st.volume, st.volume_max)
+}
+
+fn adjust_local_volume(
+    app_state: &Arc<Mutex<AppState>>,
+    local_player: &Arc<Mutex<LocalPlayer>>,
+    spotify_audio: &Arc<SpotifyPipeAudio>,
+    delta: i32,
+) {
+    let percent = {
+        let mut st = app_state.lock().unwrap();
+        let volume_max = st.volume_max.max(1);
+        let next_volume = (st.volume + delta).clamp(0, volume_max);
+        st.set_volume(next_volume, volume_max);
+        local_volume_percent(st.volume, st.volume_max)
+    };
+    local_player.lock().unwrap().set_volume_percent(percent);
+    spotify_audio.set_volume_percent(percent);
+}
+
 /// Sync local player's current track info into AppState for rendering.
 fn sync_local_track_to_app(
     player: &LocalPlayer,
@@ -1277,7 +1333,14 @@ fn local_playback_monitor(
             continue;
         }
 
+        let volume_percent = current_local_volume_percent(&app_state);
         let mut player = local_player.lock().unwrap();
+        player.set_volume_percent(volume_percent);
+
+        if player.refresh_audio_route() {
+            sync_local_track_to_app(&player, &app_state, &favorites);
+            continue;
+        }
 
         // Check if track ended and auto-advance
         if player.check_and_advance() {
@@ -1436,8 +1499,9 @@ mod tests {
     }
 
     #[test]
-    fn local_restore_target_is_none_without_remembered_uri() {
+    fn local_restore_target_falls_back_to_first_downloaded_without_remembered_uri() {
         let downloaded = vec![test_entry("track:1")];
-        assert!(select_local_restore_target(&downloaded, None).is_none());
+        let target = select_local_restore_target(&downloaded, None).map(|entry| entry.uri.clone());
+        assert_eq!(target.as_deref(), Some("track:1"));
     }
 }

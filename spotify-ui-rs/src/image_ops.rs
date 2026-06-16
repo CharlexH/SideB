@@ -316,6 +316,11 @@ mod tests {
     }
 
     #[test]
+    fn roll_cache_bucket_count_stays_device_safe() {
+        assert!(roll_cache_sizes().len() <= 7);
+    }
+
+    #[test]
     fn test_animation_cache_frame_counts_are_fixed_to_thirty() {
         assert_eq!(ROTATION_FRAME_COUNT, 30);
         assert_eq!(TAPEROLL_FRAME_COUNT, 30);

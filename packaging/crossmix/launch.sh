@@ -13,6 +13,36 @@ PREV_GOVERNOR=
 PREV_MIN_FREQ=
 PREV_MAX_FREQ=
 BACKEND_PID=
+SPOTIFY_AUDIO_PIPE=/tmp/sideb-spotify.pcm
+export SIDEB_SPOTIFY_PIPE="$SPOTIFY_AUDIO_PIPE"
+
+start_spotify_backend() {
+    echo "launch: spotify audio_backend=pipe audio_output_pipe=$SPOTIFY_AUDIO_PIPE" >> /tmp/go-librespot.log
+    /tmp/go-librespot \
+        --config_dir "$SIDEB_DATA_DIR" \
+        --conf "audio_backend=pipe" \
+        --conf "audio_output_pipe=$SPOTIFY_AUDIO_PIPE" \
+        --conf "audio_output_pipe_format=s16le" \
+        --conf "external_volume=true" \
+        >> /tmp/go-librespot.log 2>&1 &
+    BACKEND_PID=$!
+}
+
+prepare_spotify_audio_pipe() {
+    rm -f "$SPOTIFY_AUDIO_PIPE"
+    mkfifo "$SPOTIFY_AUDIO_PIPE"
+}
+
+prepare_usb_audio_host() {
+    for power_control in \
+        /sys/devices/platform/soc/*ehci*-controller/power/control \
+        /sys/devices/platform/soc/*ohci*-controller/power/control \
+        /sys/bus/usb/devices/*/power/control \
+        /sys/bus/usb/devices/usb*/power/control \
+        /sys/bus/usb/devices/*-0:1.0/usb*-port*/power/control; do
+        [ -w "$power_control" ] && printf '%s\n' on > "$power_control"
+    done
+}
 
 save_cpu_state() {
     if [ -r "$CPU_FREQ/scaling_governor" ] &&
@@ -35,6 +65,7 @@ restore_cpu_state() {
 cleanup() {
     [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null
     killall go-librespot 2>/dev/null
+    rm -f "$SPOTIFY_AUDIO_PIPE"
     rm -f /tmp/stay_awake
     rm -f /tmp/stay_alive
     restore_cpu_state
@@ -54,12 +85,14 @@ fi
 
 echo 1 > /tmp/stay_awake
 echo 1 > /tmp/stay_alive
+prepare_usb_audio_host
 
 killall go-librespot 2>/dev/null
 killall sideb 2>/dev/null
 sleep 1
 echo 1 > /tmp/stay_awake
 echo 1 > /tmp/stay_alive
+prepare_usb_audio_host
 
 cp "$progdir/go-librespot" /tmp/go-librespot
 cp "$progdir/sideb" /tmp/sideb
@@ -70,8 +103,9 @@ chmod +x /tmp/go-librespot /tmp/sideb
 [ -f "$progdir/node" ] && cp "$progdir/node" /tmp/node && chmod +x /tmp/node
 
 mkdir -p "$SIDEB_DATA_DIR"
-/tmp/go-librespot --config_dir "$SIDEB_DATA_DIR" > /tmp/go-librespot.log 2>&1 &
-BACKEND_PID=$!
+: > /tmp/go-librespot.log
+prepare_spotify_audio_pipe || exit 1
+start_spotify_backend
 
 APP_STATUS=0
 /tmp/sideb 2>/tmp/sideb.log || APP_STATUS=$?
