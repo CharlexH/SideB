@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use jpeg_decoder::{ImageInfo as JpegImageInfo, PixelFormat};
@@ -40,12 +40,9 @@ pub fn resource_candidates(name: &str) -> Vec<PathBuf> {
 
 /// Find the first existing resource file path.
 pub fn find_resource(name: &str) -> Option<PathBuf> {
-    for path in resource_candidates(name) {
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
+    resource_candidates(name)
+        .into_iter()
+        .find(|path| path.exists())
 }
 
 /// Load a PNG image from resource candidates.
@@ -67,7 +64,13 @@ fn load_png(path: &Path) -> Result<RgbaImage, Box<dyn std::error::Error>> {
     // Auto-expand indexed/grayscale/16-bit to 8-bit RGBA
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
     let mut reader = decoder.read_info()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let output_size = reader.output_buffer_size().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "PNG output buffer size exceeds decoder limits",
+        )
+    })?;
+    let mut buf = vec![0u8; output_size];
     let info = reader.next_frame(&mut buf)?;
     buf.truncate(info.buffer_size());
 
@@ -101,9 +104,11 @@ fn load_png(path: &Path) -> Result<RgbaImage, Box<dyn std::error::Error>> {
 pub fn decode_image_bytes(data: &[u8]) -> Option<RgbaImage> {
     // Try PNG first
     if data.starts_with(&[0x89, b'P', b'N', b'G']) {
-        let decoder = png::Decoder::new(data);
+        let mut decoder = png::Decoder::new(Cursor::new(data));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
         if let Ok(mut reader) = decoder.read_info() {
-            let mut buf = vec![0u8; reader.output_buffer_size()];
+            let output_size = reader.output_buffer_size()?;
+            let mut buf = vec![0u8; output_size];
             if let Ok(info) = reader.next_frame(&mut buf) {
                 buf.truncate(info.buffer_size());
                 let pixels = if info.color_type == png::ColorType::Rgba {

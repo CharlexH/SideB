@@ -81,7 +81,7 @@ impl Framebuffer {
     }
 
     /// Get mutable slice to the framebuffer (for clearing on exit).
-    pub fn as_mut_slice(&self) -> &mut [u8] {
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.fb_ptr, FB_SIZE) }
     }
 }

@@ -222,10 +222,9 @@ fn run_nextui_suspend_from(candidates: &[PathBuf]) -> io::Result<()> {
         return Ok(());
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        format!("suspend script exited with {status}"),
-    ))
+    Err(io::Error::other(format!(
+        "suspend script exited with {status}"
+    )))
 }
 
 fn with_keepalive_released<F>(paths: &[PathBuf], action: F) -> io::Result<()>

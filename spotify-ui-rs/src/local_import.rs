@@ -12,10 +12,12 @@ use serde::Deserialize;
 use crate::constants::SYSTEM_FFMPEG_BIN;
 use crate::favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
 use crate::mode::InputAction;
+use crate::network::is_allowed_cover_url;
 use crate::paths::app_paths;
 use crate::resources;
 
 const IMPORT_SCAN_INTERVAL: Duration = Duration::from_secs(3);
+const IMPORT_STABLE_AGE: Duration = Duration::from_secs(2);
 const MIN_IMPORT_PROGRESS_VISIBLE: Duration = Duration::from_millis(1500);
 const ITUNES_SEARCH_BASE_URL: &str = "https://itunes.apple.com/search";
 static EXISTING_ONLINE_COVER_ATTEMPTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -38,6 +40,7 @@ enum MetadataSource {
 struct ImportScanReport {
     candidates: usize,
     imported: usize,
+    failed: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +103,7 @@ fn scan_once_report(
     }
 
     let mut imported = 0usize;
+    let mut failed = 0usize;
     let candidates = import_candidates.len();
     for (idx, path) in import_candidates.into_iter().enumerate() {
         let allow_directory_cover = path
@@ -112,6 +116,7 @@ fn scan_once_report(
                 imported += 1;
             }
             Err(e) => {
+                failed += 1;
                 eprintln!("import: {}: {e}", path.display());
             }
         }
@@ -126,6 +131,7 @@ fn scan_once_report(
     ImportScanReport {
         candidates,
         imported,
+        failed,
     }
 }
 
@@ -188,13 +194,17 @@ pub fn sync_existing_music_covers(favorites: &Arc<Mutex<FavoritesManager>>) -> u
 }
 
 fn collect_import_candidates(imports_dir: &Path) -> Vec<PathBuf> {
+    collect_import_candidates_with_min_age(imports_dir, IMPORT_STABLE_AGE)
+}
+
+fn collect_import_candidates_with_min_age(imports_dir: &Path, min_age: Duration) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    collect_import_candidates_into(imports_dir, &mut candidates);
+    collect_import_candidates_into(imports_dir, &mut candidates, min_age);
     candidates.sort();
     candidates
 }
 
-fn collect_import_candidates_into(dir: &Path, candidates: &mut Vec<PathBuf>) {
+fn collect_import_candidates_into(dir: &Path, candidates: &mut Vec<PathBuf>, min_age: Duration) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -217,8 +227,11 @@ fn collect_import_candidates_into(dir: &Path, candidates: &mut Vec<PathBuf>) {
             if should_skip_import_dir(&path) {
                 continue;
             }
-            collect_import_candidates_into(&path, candidates);
-        } else if file_type.is_file() && is_importable_mp3_path(&path) {
+            collect_import_candidates_into(&path, candidates, min_age);
+        } else if file_type.is_file()
+            && is_importable_mp3_path(&path)
+            && is_stable_import_file(&path, min_age)
+        {
             candidates.push(path);
         }
     }
@@ -249,6 +262,19 @@ fn is_appledouble_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_stable_import_file(path: &Path, min_age: Duration) -> bool {
+    if min_age.is_zero() {
+        return true;
+    }
+
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .map(|age| age >= min_age)
+        .unwrap_or(false)
+}
+
 pub fn run(
     favorites: Arc<Mutex<FavoritesManager>>,
     cmd_tx: Sender<InputAction>,
@@ -270,7 +296,9 @@ pub fn run(
             if elapsed < MIN_IMPORT_PROGRESS_VISIBLE {
                 std::thread::sleep(MIN_IMPORT_PROGRESS_VISIBLE - elapsed);
             }
-            let _ = cmd_tx.send(InputAction::ImportFinished);
+            let _ = cmd_tx.send(InputAction::ImportFinished {
+                failed: report.failed,
+            });
         }
         if report.imported > 0 || cover_updates > 0 {
             let _ = cmd_tx.send(InputAction::LibraryChanged);
@@ -777,6 +805,11 @@ fn fetch_text_url(url: &str) -> Option<String> {
 }
 
 fn download_url_to_file(url: &str, dest: &Path) -> bool {
+    if !is_allowed_cover_url(url) {
+        eprintln!("import: rejected untrusted cover url={url}");
+        return false;
+    }
+
     let mut cmd = curl_base_command(url);
     cmd.args(["-o"]).arg(dest);
 
@@ -892,7 +925,7 @@ mod tests {
         fs::write(deep.join("Upper.MP3"), b"mp3").unwrap();
         fs::write(deep.join("notes.txt"), b"text").unwrap();
 
-        let candidates = collect_import_candidates(&base);
+        let candidates = collect_import_candidates_with_min_age(&base, Duration::ZERO);
         let relative: Vec<String> = candidates
             .iter()
             .map(|path| {
@@ -931,7 +964,7 @@ mod tests {
         fs::write(hidden.join("Hidden.mp3"), b"mp3").unwrap();
         fs::write(macosx.join("ResourceFork.mp3"), b"mp3").unwrap();
 
-        let candidates = collect_import_candidates(&base);
+        let candidates = collect_import_candidates_with_min_age(&base, Duration::ZERO);
         let relative: Vec<String> = candidates
             .iter()
             .map(|path| {
@@ -943,6 +976,25 @@ mod tests {
             .collect();
 
         assert_eq!(relative, vec!["Album/Nested.mp3"]);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn import_candidates_skip_recently_modified_mp3_files() {
+        let base = std::env::temp_dir().join(format!(
+            "sideb-import-recent-file-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("Still Copying.mp3"), b"mp3").unwrap();
+
+        let candidates = collect_import_candidates(&base);
+
+        assert!(candidates.is_empty());
 
         let _ = fs::remove_dir_all(&base);
     }

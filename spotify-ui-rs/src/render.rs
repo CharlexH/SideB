@@ -495,6 +495,7 @@ pub struct RenderState {
 
 impl RenderState {
     /// Initialize all render caches from loaded assets.
+    #[allow(clippy::too_many_arguments)]
     pub fn init(
         tape_base: &RgbaImage,
         tape_a: &RgbaImage,
@@ -778,6 +779,7 @@ pub fn render(
 }
 
 /// 30 FPS render loop — updates animation state and calls render.
+#[allow(clippy::too_many_arguments)]
 pub fn render_loop(
     fb: &Framebuffer,
     back_buf: &mut [u8],

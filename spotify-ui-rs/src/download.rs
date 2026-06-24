@@ -1,17 +1,22 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
 use crate::constants::{FFMPEG_TRANSCODER_BIN, NODE_BIN, YTDLP_BIN};
+use crate::favorites::FavoriteEntry;
 use crate::favorites::FavoritesManager;
 use crate::log_utils::{exit_status_label, format_bytes, summarize_command_output};
+use crate::mode::AppMode;
+use crate::network::is_allowed_cover_url;
 use crate::paths::app_paths;
 
 const MAX_RETRIES: u32 = 1;
@@ -20,6 +25,10 @@ const CANDIDATE_COUNT: usize = 5;
 const DURATION_REJECT_THRESHOLD_MS: i64 = 15_000;
 const PROGRESS_THROTTLE_MS: u128 = 400;
 const MAX_CAPTURED_STDERR_BYTES: usize = 16 * 1024;
+const MAX_CAPTURED_STDOUT_BYTES: usize = 512 * 1024;
+const YTDLP_SEARCH_TIMEOUT: Duration = Duration::from_secs(60);
+const YTDLP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const YTDLP_TEMP_SUBDIR: &str = "tmp/yt-dlp";
 
 /// Download phase visible to the UI.
 /// Overall progress: Queued=0%, Searching=0-25%, Downloading=25-75%, Transcoding=75-100%.
@@ -107,6 +116,18 @@ enum DownloadOutcome {
     Failed(DownloadFailureKind),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingQueueAction {
+    Remove,
+    KeepForRetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuePlacement {
+    Back,
+    Front,
+}
+
 /// A candidate result from YouTube search metadata.
 struct SearchCandidate {
     id: String,
@@ -115,9 +136,56 @@ struct SearchCandidate {
     channel: Option<String>,
 }
 
+#[derive(Clone)]
+struct DownloadWorkQueue {
+    inner: Arc<(Mutex<VecDeque<DownloadRequest>>, Condvar)>,
+}
+
+impl DownloadWorkQueue {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+        }
+    }
+
+    fn enqueue_back(&self, request: DownloadRequest) {
+        let (lock, cvar) = &*self.inner;
+        let mut queue = lock.lock().unwrap();
+        queue.push_back(request);
+        cvar.notify_one();
+    }
+
+    fn enqueue_front_promote(&self, request: DownloadRequest) -> bool {
+        let (lock, cvar) = &*self.inner;
+        let mut queue = lock.lock().unwrap();
+        let original_len = queue.len();
+        queue.retain(|existing| existing.uri != request.uri);
+        let promoted = queue.len() != original_len;
+        queue.push_front(request);
+        cvar.notify_one();
+        promoted
+    }
+
+    fn pop_front(&self) -> DownloadRequest {
+        let (lock, cvar) = &*self.inner;
+        let mut queue = lock.lock().unwrap();
+        loop {
+            if let Some(request) = queue.pop_front() {
+                return request;
+            }
+            queue = cvar.wait(queue).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> Vec<DownloadRequest> {
+        self.inner.0.lock().unwrap().iter().cloned().collect()
+    }
+}
+
 /// Manages a queue of background downloads via yt-dlp.
 pub struct DownloadManager {
-    tx: mpsc::Sender<DownloadRequest>,
+    queue: DownloadWorkQueue,
     pending_uris: Arc<Mutex<HashSet<String>>>,
     progress: DownloadProgressMap,
     pending_queue_path: PathBuf,
@@ -126,19 +194,21 @@ pub struct DownloadManager {
 impl DownloadManager {
     /// Create a new manager and spawn the background download thread.
     pub fn new(favorites: Arc<Mutex<FavoritesManager>>, app_state: Arc<Mutex<AppState>>) -> Self {
-        let (tx, rx) = mpsc::channel::<DownloadRequest>();
+        let queue = DownloadWorkQueue::new();
+        let thread_queue = queue.clone();
         let pending_uris = Arc::new(Mutex::new(HashSet::new()));
         let pending_clone = Arc::clone(&pending_uris);
         let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
         let progress_clone = Arc::clone(&progress);
         let pending_queue_path = pending_download_queue_path();
         let thread_pending_queue_path = pending_queue_path.clone();
+        let restore_favorites = Arc::clone(&favorites);
 
         std::thread::Builder::new()
             .name("download".into())
             .spawn(move || {
                 download_loop(
-                    rx,
+                    thread_queue,
                     favorites,
                     pending_clone,
                     app_state,
@@ -149,12 +219,13 @@ impl DownloadManager {
             .expect("spawn download thread");
 
         let manager = Self {
-            tx,
+            queue,
             pending_uris,
             progress,
             pending_queue_path,
         };
         manager.restore_pending_downloads();
+        manager.restore_incomplete_favorite_downloads(&restore_favorites);
         manager
     }
 
@@ -182,29 +253,63 @@ impl DownloadManager {
             .lock()
             .unwrap()
             .insert(uri.clone(), DownloadPhase::Queued);
-        persist_pending_download_to(&self.pending_queue_path, &request);
+        persist_pending_download_to(&self.pending_queue_path, &request, QueuePlacement::Back);
+        self.queue.enqueue_back(request);
 
-        if let Err(e) = self.tx.send(request) {
-            eprintln!("download: enqueue failed: {e}");
-            self.progress.lock().unwrap().remove(&uri);
-            remove_pending_download_from(&self.pending_queue_path, &uri);
-        } else {
-            eprintln!(
-                "download: queued uri={} track={} - {} pending={}",
-                uri, artist_name, track_name, pending_count
-            );
+        eprintln!(
+            "download: queued uri={} track={} - {} pending={}",
+            uri, artist_name, track_name, pending_count
+        );
+    }
+
+    /// Queue a retry at the front. Existing queued work for the URI is promoted.
+    pub fn retry_now(&self, request: DownloadRequest) {
+        let mut pending = self.pending_uris.lock().unwrap();
+        let already_pending = pending.contains(&request.uri);
+        if !already_pending {
+            pending.insert(request.uri.clone());
         }
+        let pending_count = pending.len();
+        drop(pending);
+
+        let uri = request.uri.clone();
+        let artist_name = request.artist_name.clone();
+        let track_name = request.track_name.clone();
+        self.progress
+            .lock()
+            .unwrap()
+            .insert(uri.clone(), DownloadPhase::Queued);
+        persist_pending_download_to(&self.pending_queue_path, &request, QueuePlacement::Front);
+        let promoted = self.queue.enqueue_front_promote(request);
+
+        eprintln!(
+            "download: retry queued front uri={} track={} - {} pending={} already_pending={} promoted={}",
+            uri, artist_name, track_name, pending_count, already_pending, promoted
+        );
     }
 
     fn restore_pending_downloads(&self) {
         let restored_count = restore_pending_downloads_from(
             &self.pending_queue_path,
-            &self.tx,
+            &self.queue,
             &self.pending_uris,
             &self.progress,
         );
         if restored_count > 0 {
             eprintln!("download: restored {restored_count} pending download(s)");
+        }
+    }
+
+    fn restore_incomplete_favorite_downloads(&self, favorites: &Arc<Mutex<FavoritesManager>>) {
+        let restored_count = restore_incomplete_favorite_downloads_from(
+            favorites,
+            &self.pending_queue_path,
+            &self.queue,
+            &self.pending_uris,
+            &self.progress,
+        );
+        if restored_count > 0 {
+            eprintln!("download: restored {restored_count} incomplete favorite download(s)");
         }
     }
 }
@@ -264,10 +369,13 @@ fn save_pending_downloads_to(path: &Path, requests: &[DownloadRequest]) {
     }
 }
 
-fn persist_pending_download_to(path: &Path, request: &DownloadRequest) {
+fn persist_pending_download_to(path: &Path, request: &DownloadRequest, placement: QueuePlacement) {
     let mut requests = load_pending_downloads_from(path);
     requests.retain(|existing| existing.uri != request.uri);
-    requests.push(request.clone());
+    match placement {
+        QueuePlacement::Back => requests.push(request.clone()),
+        QueuePlacement::Front => requests.insert(0, request.clone()),
+    }
     save_pending_downloads_to(path, &requests);
 }
 
@@ -282,7 +390,7 @@ fn remove_pending_download_from(path: &Path, uri: &str) {
 
 fn restore_pending_downloads_from(
     path: &Path,
-    tx: &mpsc::Sender<DownloadRequest>,
+    queue: &DownloadWorkQueue,
     pending_uris: &Arc<Mutex<HashSet<String>>>,
     progress: &DownloadProgressMap,
 ) -> usize {
@@ -312,14 +420,75 @@ fn restore_pending_downloads_from(
             .unwrap()
             .insert(request.uri.clone(), DownloadPhase::Queued);
 
-        if let Err(e) = tx.send(request.clone()) {
-            eprintln!("download: restore enqueue failed: {e}");
-            pending_uris.lock().unwrap().remove(&request.uri);
-            progress.lock().unwrap().remove(&request.uri);
-            remove_pending_download_from(path, &request.uri);
-        } else {
-            restored_count += 1;
+        queue.enqueue_back(request);
+        restored_count += 1;
+    }
+
+    restored_count
+}
+
+pub(crate) fn download_request_for_incomplete_favorite(
+    entry: &FavoriteEntry,
+) -> Option<DownloadRequest> {
+    use crate::favorites::FavoriteSource;
+
+    if entry.source != FavoriteSource::Spotify {
+        return None;
+    }
+    if entry.downloaded
+        && entry
+            .file_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
+    {
+        return None;
+    }
+    if entry.uri.trim().is_empty() || entry.name.trim().is_empty() || entry.artist.trim().is_empty()
+    {
+        return None;
+    }
+
+    Some(DownloadRequest {
+        uri: entry.uri.clone(),
+        track_name: entry.name.clone(),
+        artist_name: entry.artist.clone(),
+        cover_url: entry.cover_url.clone(),
+        spotify_duration_ms: entry.spotify_duration_ms,
+    })
+}
+
+fn restore_incomplete_favorite_downloads_from(
+    favorites: &Arc<Mutex<FavoritesManager>>,
+    path: &Path,
+    queue: &DownloadWorkQueue,
+    pending_uris: &Arc<Mutex<HashSet<String>>>,
+    progress: &DownloadProgressMap,
+) -> usize {
+    let requests: Vec<DownloadRequest> = favorites
+        .lock()
+        .unwrap()
+        .all_entries()
+        .iter()
+        .filter_map(download_request_for_incomplete_favorite)
+        .collect();
+
+    let mut restored_count = 0;
+    for request in requests {
+        let mut pending = pending_uris.lock().unwrap();
+        if pending.contains(&request.uri) {
+            continue;
         }
+        pending.insert(request.uri.clone());
+        drop(pending);
+
+        progress
+            .lock()
+            .unwrap()
+            .insert(request.uri.clone(), DownloadPhase::Queued);
+        persist_pending_download_to(path, &request, QueuePlacement::Back);
+
+        queue.enqueue_back(request);
+        restored_count += 1;
     }
 
     restored_count
@@ -343,12 +512,70 @@ fn sanitize_filename(s: &str) -> String {
 
 /// Apply common yt-dlp options: JS runtime and optional cookies.
 fn apply_ytdlp_opts(cmd: &mut Command, cookies: Option<&Path>) {
+    cmd.args([
+        "--socket-timeout",
+        "15",
+        "--retries",
+        "2",
+        "--fragment-retries",
+        "2",
+    ]);
     let node = Path::new(NODE_BIN);
     if node.exists() {
         cmd.args(["--js-runtimes", &format!("node:{}", NODE_BIN)]);
     }
     if let Some(cookie_path) = cookies {
         cmd.args(["--cookies", &cookie_path.to_string_lossy()]);
+    }
+}
+
+struct YtdlpTempDir {
+    path: PathBuf,
+}
+
+impl YtdlpTempDir {
+    fn new() -> std::io::Result<Self> {
+        Self::new_at(app_paths().data_dir.join(YTDLP_TEMP_SUBDIR))
+    }
+
+    fn new_at(path: PathBuf) -> std::io::Result<Self> {
+        fs::create_dir_all(&path)?;
+        cleanup_pyinstaller_temp_dirs(&path);
+        Ok(Self { path })
+    }
+
+    fn apply_to(&self, cmd: &mut Command) {
+        apply_ytdlp_temp_env(cmd, &self.path);
+    }
+}
+
+impl Drop for YtdlpTempDir {
+    fn drop(&mut self) {
+        cleanup_pyinstaller_temp_dirs(&self.path);
+    }
+}
+
+fn apply_ytdlp_temp_env(cmd: &mut Command, temp_dir: &Path) {
+    cmd.env("TMPDIR", temp_dir);
+    cmd.env("TEMP", temp_dir);
+    cmd.env("TMP", temp_dir);
+}
+
+fn cleanup_pyinstaller_temp_dirs(temp_dir: &Path) {
+    let entries = match fs::read_dir(temp_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.starts_with("_MEI") {
+            continue;
+        }
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -364,20 +591,36 @@ fn resolve_cookies_path() -> Option<PathBuf> {
 }
 
 /// Search YouTube for candidates using yt-dlp metadata extraction (no download).
-fn search_candidates(query: &str, count: usize, cookies: Option<&Path>) -> Vec<SearchCandidate> {
+fn search_candidates(
+    query: &str,
+    count: usize,
+    cookies: Option<&Path>,
+) -> Result<Vec<SearchCandidate>, DownloadFailureKind> {
     let search_term = format!("ytsearch{}:{}", count, query);
+    let ytdlp_temp = match YtdlpTempDir::new() {
+        Ok(temp) => temp,
+        Err(error) => {
+            eprintln!("download: candidate search temp dir unavailable: {error}");
+            return Err(DownloadFailureKind::TempStorage);
+        }
+    };
     let mut cmd = Command::new(YTDLP_BIN);
     cmd.args(["--dump-single-json", "--flat-playlist", "--no-warnings"]);
     apply_ytdlp_opts(&mut cmd, cookies);
+    ytdlp_temp.apply_to(&mut cmd);
     cmd.arg(&search_term);
 
     eprintln!("download: searching candidates count={count} query={query}");
 
-    let output = match cmd.output() {
-        Ok(o) => o,
+    let output = match command_output_with_timeout(cmd, YTDLP_SEARCH_TIMEOUT) {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            eprintln!("download: candidate search timed out query={query}");
+            return Err(DownloadFailureKind::Network);
+        }
         Err(e) => {
             eprintln!("download: candidate search failed to launch: {e}");
-            return Vec::new();
+            return Err(classify_ytdlp_launch_error(&e));
         }
     };
 
@@ -387,10 +630,10 @@ fn search_candidates(query: &str, count: usize, cookies: Option<&Path>) -> Vec<S
             exit_status_label(&output.status),
             summarize_command_output(&output.stderr)
         );
-        return Vec::new();
+        return Err(classify_download_failure_bytes(&output.stderr));
     }
 
-    parse_candidates_json(&output.stdout)
+    Ok(parse_candidates_json(&output.stdout))
 }
 
 /// Parse yt-dlp --dump-single-json output into candidates.
@@ -629,7 +872,14 @@ fn classify_download_failure(details: &str) -> DownloadFailureKind {
 }
 
 fn spawn_limited_capture_thread<R: Read + Send + 'static>(
+    reader: R,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    spawn_capture_thread_with_limit(reader, MAX_CAPTURED_STDERR_BYTES)
+}
+
+fn spawn_capture_thread_with_limit<R: Read + Send + 'static>(
     mut reader: R,
+    limit: usize,
 ) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut captured = Vec::new();
@@ -638,7 +888,7 @@ fn spawn_limited_capture_thread<R: Read + Send + 'static>(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(captured.len());
+                    let remaining = limit.saturating_sub(captured.len());
                     if remaining > 0 {
                         captured.extend_from_slice(&buf[..n.min(remaining)]);
                     }
@@ -721,14 +971,17 @@ fn validate_downloaded_track(
 
 /// Background loop that processes download requests one at a time.
 fn download_loop(
-    rx: mpsc::Receiver<DownloadRequest>,
+    queue: DownloadWorkQueue,
     favorites: Arc<Mutex<FavoritesManager>>,
     pending_uris: Arc<Mutex<HashSet<String>>>,
     app_state: Arc<Mutex<AppState>>,
     progress: DownloadProgressMap,
     pending_queue_path: PathBuf,
 ) {
-    for req in rx.iter() {
+    loop {
+        let req = queue.pop_front();
+        wait_for_spotify_idle_before_download(&req.uri, &app_state);
+
         eprintln!(
             "download: starting uri={} track={} - {} spotify_duration={:?}ms",
             req.uri, req.artist_name, req.track_name, req.spotify_duration_ms
@@ -747,7 +1000,7 @@ fn download_loop(
                 );
                 continue;
             }
-            if fav.find_by_uri(&req.uri).map_or(false, |e| e.downloaded) {
+            if fav.find_by_uri(&req.uri).is_some_and(|e| e.downloaded) {
                 eprintln!("download: skipping (already downloaded): {}", req.uri);
                 clear_download_bookkeeping(
                     &req.uri,
@@ -787,7 +1040,7 @@ fn download_loop(
                 .lock()
                 .unwrap()
                 .find_by_uri(&req.uri)
-                .map_or(false, |e| e.downloaded);
+                .is_some_and(|e| e.downloaded);
             if !is_downloaded {
                 cleanup_stale_files(&output_path, &base_name, &music_dir);
             }
@@ -797,56 +1050,53 @@ fn download_loop(
         let output_template = output_path.to_string_lossy().to_string();
         let cookies = resolve_cookies_path();
 
-        let candidates = search_candidates(&search_query, CANDIDATE_COUNT, cookies.as_deref());
+        let candidate_search =
+            search_candidates(&search_query, CANDIDATE_COUNT, cookies.as_deref());
 
-        let outcome = if candidates.is_empty() {
-            eprintln!("download: no candidates found, falling back to direct search");
-            try_direct_download(
-                &req,
-                &search_query,
-                &output_template,
-                &output_path,
-                cookies.as_deref(),
-                &favorites,
-                &progress,
-                &app_state,
-            )
-        } else {
-            let mut scored: Vec<(f64, &SearchCandidate)> = candidates
-                .iter()
-                .map(|c| (score_candidate(c, &req), c))
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-            for (i, (sc, cand)) in scored.iter().enumerate() {
-                eprintln!(
-                    "download: candidate #{} score={:.1} id={} title=\"{}\" duration={:.1}s channel={:?}",
-                    i + 1,
-                    sc,
-                    cand.id,
-                    cand.title,
-                    cand.duration_secs.unwrap_or(0.0),
-                    cand.channel
-                );
-            }
-
-            try_candidates_download(
-                &req,
-                &scored,
-                &output_template,
-                &output_path,
-                cookies.as_deref(),
-                &favorites,
-                &progress,
-                &app_state,
-            )
+        let attempt = DownloadAttemptContext {
+            output_template: &output_template,
+            output_path: &output_path,
+            cookies: cookies.as_deref(),
+            favorites: &favorites,
+            progress: &progress,
+            app_state: &app_state,
         };
 
-        match outcome {
+        let outcome = match candidate_search {
+            Err(kind) => DownloadOutcome::Failed(kind),
+            Ok(candidates) if candidates.is_empty() => {
+                eprintln!("download: no candidates found, falling back to direct search");
+                try_direct_download(&req, &search_query, &attempt)
+            }
+            Ok(candidates) => {
+                let mut scored: Vec<(f64, &SearchCandidate)> = candidates
+                    .iter()
+                    .map(|c| (score_candidate(c, &req), c))
+                    .collect();
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+                for (i, (sc, cand)) in scored.iter().enumerate() {
+                    eprintln!(
+                        "download: candidate #{} score={:.1} id={} title=\"{}\" duration={:.1}s channel={:?}",
+                        i + 1,
+                        sc,
+                        cand.id,
+                        cand.title,
+                        cand.duration_secs.unwrap_or(0.0),
+                        cand.channel
+                    );
+                }
+
+                try_candidates_download(&req, &scored, &attempt)
+            }
+        };
+
+        let pending_queue_action = match outcome {
             DownloadOutcome::Success => {
                 finalize_download(&req, &output_path, &cover_path, &favorites);
+                PendingQueueAction::Remove
             }
-            DownloadOutcome::Skipped => {}
+            DownloadOutcome::Skipped => PendingQueueAction::Remove,
             DownloadOutcome::Failed(kind) => {
                 if output_path.exists() {
                     let _ = std::fs::remove_file(&output_path);
@@ -861,18 +1111,45 @@ fn download_loop(
                     req.uri, req.artist_name, req.track_name, kind
                 );
                 show_final_download_failure_notice(&outcome, &app_state);
+                PendingQueueAction::KeepForRetry
             }
-        }
+        };
 
         // Clear progress entry and notify UI
-        clear_download_bookkeeping(
+        finish_download_bookkeeping(
             &req.uri,
             &pending_uris,
             &progress,
             &app_state,
             &pending_queue_path,
+            pending_queue_action,
         );
     }
+}
+
+fn wait_for_spotify_idle_before_download(uri: &str, app_state: &Arc<Mutex<AppState>>) {
+    let mut logged = false;
+    loop {
+        let defer = app_state
+            .lock()
+            .map(|state| should_defer_download_for_spotify(&state))
+            .unwrap_or(false);
+        if !defer {
+            if logged {
+                eprintln!("download: resumed after Spotify idle uri={uri}");
+            }
+            return;
+        }
+        if !logged {
+            eprintln!("download: deferred while Spotify playing uri={uri}");
+            logged = true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn should_defer_download_for_spotify(state: &AppState) -> bool {
+    state.mode == AppMode::Spotify && !state.paused
 }
 
 fn mark_dirty(app_state: &Arc<Mutex<AppState>>) {
@@ -888,9 +1165,32 @@ fn clear_download_bookkeeping(
     app_state: &Arc<Mutex<AppState>>,
     pending_queue_path: &Path,
 ) {
+    finish_download_bookkeeping(
+        uri,
+        pending_uris,
+        progress,
+        app_state,
+        pending_queue_path,
+        PendingQueueAction::Remove,
+    );
+}
+
+fn finish_download_bookkeeping(
+    uri: &str,
+    pending_uris: &Arc<Mutex<HashSet<String>>>,
+    progress: &DownloadProgressMap,
+    app_state: &Arc<Mutex<AppState>>,
+    pending_queue_path: &Path,
+    pending_queue_action: PendingQueueAction,
+) {
     progress.lock().unwrap().remove(uri);
     pending_uris.lock().unwrap().remove(uri);
-    remove_pending_download_from(pending_queue_path, uri);
+    match pending_queue_action {
+        PendingQueueAction::Remove => remove_pending_download_from(pending_queue_path, uri),
+        PendingQueueAction::KeepForRetry => {
+            eprintln!("download: kept pending queue for next launch retry uri={uri}");
+        }
+    }
     mark_dirty(app_state);
 }
 
@@ -902,20 +1202,24 @@ fn show_final_download_failure_notice(outcome: &DownloadOutcome, app_state: &Arc
     }
 }
 
+struct DownloadAttemptContext<'a> {
+    output_template: &'a str,
+    output_path: &'a Path,
+    cookies: Option<&'a Path>,
+    favorites: &'a Arc<Mutex<FavoritesManager>>,
+    progress: &'a DownloadProgressMap,
+    app_state: &'a Arc<Mutex<AppState>>,
+}
+
 /// Try downloading each scored candidate in order, with post-download validation.
 fn try_candidates_download(
     req: &DownloadRequest,
     scored: &[(f64, &SearchCandidate)],
-    output_template: &str,
-    output_path: &Path,
-    cookies: Option<&Path>,
-    favorites: &Arc<Mutex<FavoritesManager>>,
-    progress: &DownloadProgressMap,
-    app_state: &Arc<Mutex<AppState>>,
+    attempt: &DownloadAttemptContext<'_>,
 ) -> DownloadOutcome {
     let mut final_failure = DownloadFailureKind::NoMatchingAudio;
     for (rank, (score, cand)) in scored.iter().enumerate() {
-        if !favorites.lock().unwrap().is_favorited(&req.uri) {
+        if !attempt.favorites.lock().unwrap().is_favorited(&req.uri) {
             eprintln!(
                 "download: skipping (unfavorited during search): {}",
                 req.uri
@@ -924,11 +1228,12 @@ fn try_candidates_download(
         }
 
         // Reset progress for each new candidate attempt
-        progress
+        attempt
+            .progress
             .lock()
             .unwrap()
             .insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
-        mark_dirty(app_state);
+        mark_dirty(attempt.app_state);
 
         let yt_url = format!("https://www.youtube.com/watch?v={}", cand.id);
         eprintln!(
@@ -941,15 +1246,15 @@ fn try_candidates_download(
 
         match download_single_url(
             &yt_url,
-            output_template,
-            cookies,
+            attempt.output_template,
+            attempt.cookies,
             &req.uri,
-            progress,
-            app_state,
+            attempt.progress,
+            attempt.app_state,
             req.spotify_duration_ms,
         ) {
             DownloadOutcome::Success => {
-                match validate_downloaded_track(output_path, req.spotify_duration_ms) {
+                match validate_downloaded_track(attempt.output_path, req.spotify_duration_ms) {
                     Ok(_) => return DownloadOutcome::Success,
                     Err(reason) => {
                         eprintln!(
@@ -962,15 +1267,15 @@ fn try_candidates_download(
                             final_failure,
                             classify_download_failure(&reason),
                         );
-                        let _ = std::fs::remove_file(output_path);
+                        let _ = std::fs::remove_file(attempt.output_path);
                     }
                 }
             }
             DownloadOutcome::Skipped => return DownloadOutcome::Skipped,
             DownloadOutcome::Failed(kind) => {
                 final_failure = prefer_download_failure(final_failure, kind);
-                if output_path.exists() {
-                    let _ = std::fs::remove_file(output_path);
+                if attempt.output_path.exists() {
+                    let _ = std::fs::remove_file(attempt.output_path);
                 }
             }
         }
@@ -988,6 +1293,13 @@ fn download_single_url(
     app_state: &Arc<Mutex<AppState>>,
     expected_duration_ms: Option<i64>,
 ) -> DownloadOutcome {
+    let ytdlp_temp = match YtdlpTempDir::new() {
+        Ok(temp) => temp,
+        Err(error) => {
+            eprintln!("download: yt-dlp temp dir unavailable: {error}");
+            return DownloadOutcome::Failed(DownloadFailureKind::TempStorage);
+        }
+    };
     let mut cmd = Command::new(YTDLP_BIN);
     cmd.args([
         "-x",
@@ -1004,6 +1316,7 @@ fn download_single_url(
         output_template,
     ]);
     apply_ytdlp_opts(&mut cmd, cookies);
+    ytdlp_temp.apply_to(&mut cmd);
     cmd.arg(url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1082,8 +1395,8 @@ fn download_single_url(
         }
     });
 
-    match child.wait() {
-        Ok(status) => {
+    match wait_child_with_timeout(&mut child, YTDLP_DOWNLOAD_TIMEOUT) {
+        Ok(Some(status)) => {
             let _ = poll_handle.join();
             if let Some(handle) = stdout_handle {
                 let _ = handle.join();
@@ -1101,6 +1414,15 @@ fn download_single_url(
                 DownloadOutcome::Failed(classify_download_failure_bytes(&stderr))
             }
         }
+        Ok(None) => {
+            eprintln!("download: yt-dlp timed out url={url}");
+            let _ = poll_handle.join();
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            let _ = collect_captured_output(stderr_handle);
+            DownloadOutcome::Failed(DownloadFailureKind::Network)
+        }
         Err(e) => {
             eprintln!("download: yt-dlp wait error: {e}");
             let _ = poll_handle.join();
@@ -1110,6 +1432,70 @@ fn download_single_url(
             let _ = collect_captured_output(stderr_handle);
             DownloadOutcome::Failed(DownloadFailureKind::Generic)
         }
+    }
+}
+
+fn wait_child_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if started.elapsed() >= timeout {
+            kill_child_process_group(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn kill_child_process_group(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
+fn command_output_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> std::io::Result<Option<Output>> {
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    configure_child_process_group(&mut cmd);
+
+    let mut child = cmd.spawn()?;
+    let stdout_handle = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_capture_thread_with_limit(stdout, MAX_CAPTURED_STDOUT_BYTES));
+    let stderr_handle = child.stderr.take().map(spawn_limited_capture_thread);
+
+    match wait_child_with_timeout(&mut child, timeout)? {
+        Some(status) => Ok(Some(Output {
+            status,
+            stdout: collect_captured_output(stdout_handle),
+            stderr: collect_captured_output(stderr_handle),
+        })),
+        None => Ok(None),
+    }
+}
+
+fn configure_child_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
     }
 }
 
@@ -1131,12 +1517,7 @@ fn parse_ytdlp_progress(line: &str) -> Option<f32> {
 fn try_direct_download(
     req: &DownloadRequest,
     search_query: &str,
-    output_template: &str,
-    output_path: &Path,
-    cookies: Option<&Path>,
-    favorites: &Arc<Mutex<FavoritesManager>>,
-    progress: &DownloadProgressMap,
-    app_state: &Arc<Mutex<AppState>>,
+    ctx: &DownloadAttemptContext<'_>,
 ) -> DownloadOutcome {
     let mut final_failure = DownloadFailureKind::Generic;
     for attempt in 0..=MAX_RETRIES {
@@ -1147,18 +1528,18 @@ fn try_direct_download(
             );
             std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
 
-            if !favorites.lock().unwrap().is_favorited(&req.uri) {
+            if !ctx.favorites.lock().unwrap().is_favorited(&req.uri) {
                 eprintln!("download: skipping retry (unfavorited): {}", req.uri);
                 return DownloadOutcome::Skipped;
             }
         }
 
         // Reset progress for retry
-        progress
+        ctx.progress
             .lock()
             .unwrap()
             .insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
-        mark_dirty(app_state);
+        mark_dirty(ctx.app_state);
 
         eprintln!(
             "download: direct search attempt={}/{} uri={} query={}",
@@ -1171,15 +1552,15 @@ fn try_direct_download(
         let search_url = format!("ytsearch1:{}", search_query);
         match download_single_url(
             &search_url,
-            output_template,
-            cookies,
+            ctx.output_template,
+            ctx.cookies,
             &req.uri,
-            progress,
-            app_state,
+            ctx.progress,
+            ctx.app_state,
             req.spotify_duration_ms,
         ) {
             DownloadOutcome::Success => {
-                match validate_downloaded_track(output_path, req.spotify_duration_ms) {
+                match validate_downloaded_track(ctx.output_path, req.spotify_duration_ms) {
                     Ok(_) => return DownloadOutcome::Success,
                     Err(reason) => {
                         eprintln!(
@@ -1190,15 +1571,15 @@ fn try_direct_download(
                             final_failure,
                             classify_download_failure(&reason),
                         );
-                        let _ = std::fs::remove_file(output_path);
+                        let _ = std::fs::remove_file(ctx.output_path);
                     }
                 }
             }
             DownloadOutcome::Skipped => return DownloadOutcome::Skipped,
             DownloadOutcome::Failed(kind) => {
                 final_failure = prefer_download_failure(final_failure, kind);
-                if output_path.exists() {
-                    let _ = std::fs::remove_file(output_path);
+                if ctx.output_path.exists() {
+                    let _ = std::fs::remove_file(ctx.output_path);
                 }
             }
         }
@@ -1334,6 +1715,10 @@ fn download_cover(url: &str, dest: &Path) -> bool {
     if url.is_empty() {
         return false;
     }
+    if !is_allowed_cover_url(url) {
+        eprintln!("download: rejected untrusted cover url={url}");
+        return false;
+    }
 
     let cert_file = crate::resources::find_resource("ca-certificates.crt");
     let cert_arg = cert_file.map(|p| p.to_string_lossy().to_string());
@@ -1404,6 +1789,8 @@ fn try_copy_from_cover_cache(url: &str, dest: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
+    use crate::mode::AppMode;
 
     fn sample_request() -> DownloadRequest {
         DownloadRequest {
@@ -1412,6 +1799,23 @@ mod tests {
             artist_name: "Arianne".to_string(),
             cover_url: String::new(),
             spotify_duration_ms: Some(467_000),
+        }
+    }
+
+    fn sample_favorite(uri: &str, source: FavoriteSource, downloaded: bool) -> FavoriteEntry {
+        FavoriteEntry {
+            uri: uri.to_string(),
+            name: "Retry Me".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            cover_url: "https://i.scdn.co/image/example".to_string(),
+            source,
+            file_path: downloaded.then(|| format!("/tmp/{uri}.mp3")),
+            cover_path: None,
+            duration_ms: downloaded.then_some(123_000),
+            spotify_duration_ms: Some(123_456),
+            downloaded,
+            added_at: "0".to_string(),
         }
     }
 
@@ -1553,6 +1957,92 @@ mod tests {
         assert!(parse_candidates_json(b"not json").is_empty());
     }
 
+    #[test]
+    fn wait_child_with_timeout_kills_slow_process() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 2"])
+            .spawn()
+            .expect("spawn sleep process");
+
+        let status = wait_child_with_timeout(&mut child, Duration::from_millis(50))
+            .expect("wait should not error");
+
+        assert_eq!(status, None);
+    }
+
+    #[test]
+    fn wait_child_with_timeout_returns_fast_exit_status() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn fast process");
+
+        let status = wait_child_with_timeout(&mut child, Duration::from_secs(1))
+            .expect("wait should not error")
+            .expect("process should exit before timeout");
+
+        assert!(status.success());
+    }
+
+    #[test]
+    fn command_output_with_timeout_kills_slow_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 2"]);
+
+        let output = command_output_with_timeout(cmd, Duration::from_millis(50))
+            .expect("timeout wrapper should not error");
+
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn command_output_with_timeout_captures_fast_output() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf ok"]);
+
+        let output = command_output_with_timeout(cmd, Duration::from_secs(1))
+            .expect("timeout wrapper should not error")
+            .expect("fast command should complete");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ok");
+    }
+
+    #[test]
+    fn ytdlp_temp_guard_cleans_pyinstaller_extract_dirs() {
+        let root = temp_test_dir("ytdlp-temp-cleanup");
+        fs::create_dir_all(root.join("_MEIleak")).unwrap();
+        fs::create_dir_all(root.join("keep")).unwrap();
+        fs::write(root.join("_MEIfile"), b"keep file").unwrap();
+
+        cleanup_pyinstaller_temp_dirs(&root);
+
+        assert!(!root.join("_MEIleak").exists());
+        assert!(root.join("keep").exists());
+        assert!(root.join("_MEIfile").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ytdlp_temp_guard_sets_tmp_environment_for_child() {
+        let root = temp_test_dir("ytdlp-temp-env");
+        let guard = YtdlpTempDir::new_at(root.clone()).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf '%s|%s|%s' \"$TMPDIR\" \"$TEMP\" \"$TMP\""]);
+        guard.apply_to(&mut cmd);
+
+        let output = command_output_with_timeout(cmd, Duration::from_secs(1))
+            .expect("env command should run")
+            .expect("env command should finish");
+
+        assert!(output.status.success());
+        let expected = format!("{}|{}|{}", root.display(), root.display(), root.display());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     // --- Duration validation ---
 
     #[test]
@@ -1642,7 +2132,7 @@ mod tests {
     #[test]
     fn overall_progress_transcoding_is_in_last_quarter() {
         let p = DownloadPhase::Transcoding.overall_progress();
-        assert!(p >= 0.75 && p <= 1.0);
+        assert!((0.75..=1.0).contains(&p));
     }
 
     #[test]
@@ -1678,12 +2168,52 @@ mod tests {
     }
 
     #[test]
+    fn failed_download_bookkeeping_keeps_queue_for_next_launch_retry() {
+        let uri = "spotify:track:retry";
+        let dir = temp_test_dir("failed-download-bookkeeping");
+        let queue_path = dir.join("download_queue.json");
+        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        let request = DownloadRequest {
+            uri: uri.to_string(),
+            track_name: "Retry".to_string(),
+            artist_name: "Artist".to_string(),
+            cover_url: String::new(),
+            spotify_duration_ms: None,
+        };
+
+        pending.lock().unwrap().insert(uri.to_string());
+        progress
+            .lock()
+            .unwrap()
+            .insert(uri.to_string(), DownloadPhase::Downloading(0.5));
+        save_pending_downloads_to(&queue_path, &[request]);
+
+        finish_download_bookkeeping(
+            uri,
+            &pending,
+            &progress,
+            &app_state,
+            &queue_path,
+            PendingQueueAction::KeepForRetry,
+        );
+
+        assert!(!pending.lock().unwrap().contains(uri));
+        assert!(!progress.lock().unwrap().contains_key(uri));
+        let restored = load_pending_downloads_from(&queue_path);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].uri, uri);
+        assert!(app_state.lock().unwrap().render_dirty);
+    }
+
+    #[test]
     fn pending_download_queue_round_trips_requests() {
         let dir = temp_test_dir("pending-download-roundtrip");
         let path = dir.join("download_queue.json");
         let request = sample_request();
 
-        save_pending_downloads_to(&path, &[request.clone()]);
+        save_pending_downloads_to(&path, std::slice::from_ref(&request));
         let restored = load_pending_downloads_from(&path);
 
         assert_eq!(restored.len(), 1);
@@ -1715,17 +2245,78 @@ mod tests {
     }
 
     #[test]
+    fn pending_download_queue_can_promote_request_to_front() {
+        let dir = temp_test_dir("pending-download-promote");
+        let path = dir.join("download_queue.json");
+        let first = sample_request();
+        let second = DownloadRequest {
+            uri: "spotify:track:456".to_string(),
+            track_name: "Second".to_string(),
+            artist_name: "Artist".to_string(),
+            cover_url: String::new(),
+            spotify_duration_ms: None,
+        };
+
+        save_pending_downloads_to(&path, &[first.clone(), second.clone()]);
+        persist_pending_download_to(&path, &second, QueuePlacement::Front);
+
+        let restored = load_pending_downloads_from(&path);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].uri, second.uri);
+        assert_eq!(restored[1].uri, first.uri);
+    }
+
+    #[test]
+    fn work_queue_promotes_existing_request_to_front() {
+        let queue = DownloadWorkQueue::new();
+        let first = sample_request();
+        let second = DownloadRequest {
+            uri: "spotify:track:456".to_string(),
+            track_name: "Second".to_string(),
+            artist_name: "Artist".to_string(),
+            cover_url: String::new(),
+            spotify_duration_ms: None,
+        };
+
+        queue.enqueue_back(first.clone());
+        queue.enqueue_back(second.clone());
+
+        assert!(queue.enqueue_front_promote(second.clone()));
+
+        let queued = queue.snapshot();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].uri, second.uri);
+        assert_eq!(queued[1].uri, first.uri);
+    }
+
+    #[test]
+    fn active_spotify_playback_defers_background_downloads() {
+        let mut state = AppState::new();
+        state.set_mode(AppMode::Spotify);
+        state.set_paused(false);
+
+        assert!(should_defer_download_for_spotify(&state));
+
+        state.set_paused(true);
+        assert!(!should_defer_download_for_spotify(&state));
+
+        state.set_mode(AppMode::Local);
+        state.set_paused(false);
+        assert!(!should_defer_download_for_spotify(&state));
+    }
+
+    #[test]
     fn restore_pending_downloads_marks_progress_and_sends_requests() {
         let dir = temp_test_dir("pending-download-restore");
         let path = dir.join("download_queue.json");
         let request = sample_request();
-        save_pending_downloads_to(&path, &[request.clone()]);
+        save_pending_downloads_to(&path, std::slice::from_ref(&request));
 
-        let (tx, rx) = mpsc::channel::<DownloadRequest>();
+        let queue = DownloadWorkQueue::new();
         let pending = Arc::new(Mutex::new(HashSet::new()));
         let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
 
-        let restored = restore_pending_downloads_from(&path, &tx, &pending, &progress);
+        let restored = restore_pending_downloads_from(&path, &queue, &pending, &progress);
 
         assert_eq!(restored, 1);
         assert!(pending.lock().unwrap().contains(&request.uri));
@@ -1733,7 +2324,55 @@ mod tests {
             progress.lock().unwrap().get(&request.uri),
             Some(&DownloadPhase::Queued)
         );
-        assert_eq!(rx.try_recv().unwrap().uri, request.uri);
+        assert_eq!(queue.snapshot()[0].uri, request.uri);
+    }
+
+    #[test]
+    fn incomplete_spotify_favorites_are_restored_into_download_queue() {
+        let dir = temp_test_dir("incomplete-favorite-restore");
+        let queue_path = dir.join("download_queue.json");
+        let favorites_path = dir.join("favorites.json");
+        let mut favorites = FavoritesManager::load(&favorites_path);
+        favorites.add(sample_favorite(
+            "spotify:track:missing",
+            FavoriteSource::Spotify,
+            false,
+        ));
+        favorites.add(sample_favorite(
+            "spotify:track:done",
+            FavoriteSource::Spotify,
+            true,
+        ));
+        favorites.add(sample_favorite(
+            "local:track:import",
+            FavoriteSource::LocalImport,
+            false,
+        ));
+        let favorites = Arc::new(Mutex::new(favorites));
+        let queue = DownloadWorkQueue::new();
+        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
+
+        let restored = restore_incomplete_favorite_downloads_from(
+            &favorites,
+            &queue_path,
+            &queue,
+            &pending,
+            &progress,
+        );
+
+        assert_eq!(restored, 1);
+        assert!(pending.lock().unwrap().contains("spotify:track:missing"));
+        assert_eq!(
+            progress.lock().unwrap().get("spotify:track:missing"),
+            Some(&DownloadPhase::Queued)
+        );
+
+        let queued = load_pending_downloads_from(&queue_path);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].uri, "spotify:track:missing");
+        assert_eq!(queued[0].track_name, "Retry Me");
+        assert_eq!(queue.snapshot()[0].uri, "spotify:track:missing");
     }
 
     fn temp_test_dir(prefix: &str) -> PathBuf {

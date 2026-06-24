@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+jobs:
+  test:
+    name: Rust and release-contract checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path spotify-ui-rs/Cargo.toml --check
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path spotify-ui-rs/Cargo.toml
+
+      - name: Check Rust lints
+        run: cargo clippy --manifest-path spotify-ui-rs/Cargo.toml --all-targets -- -D warnings
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit Rust dependencies
+        run: cargo audit -D warnings -f spotify-ui-rs/Cargo.lock
+
+      - name: Check shell syntax
+        run: |
+          bash -n \
+            scripts/package.sh \
+            scripts/package_candidates.sh \
+            scripts/check_release_metadata.sh \
+            scripts/check_github_release_assets.sh \
+            scripts/check_ffmpeg_audio_transcoder.sh \
+            scripts/build_ffmpeg_audio_transcoder.sh \
+            scripts/test_check_release_metadata.sh \
+            scripts/test_check_github_release_assets.sh \
+            scripts/test_check_ffmpeg_audio_transcoder.sh \
+            scripts/test_launch_cpu_restore.sh \
+            scripts/test_runtime_contracts.sh \
+            package/SideB.pak/launch.sh \
+            packaging/nextui/launch.sh \
+            packaging/stock/launch.sh \
+            packaging/crossmix/launch.sh \
+            packaging/knulli/SideB.sh \
+            packaging/muos/mux_launch.sh
+          sh -n \
+            package/SideB.pak/launch.sh \
+            packaging/nextui/launch.sh \
+            packaging/stock/launch.sh \
+            packaging/crossmix/launch.sh \
+            packaging/knulli/SideB.sh \
+            packaging/muos/mux_launch.sh
+
+      - name: Run release-contract script tests
+        run: |
+          bash scripts/test_check_release_metadata.sh
+          bash scripts/test_check_github_release_assets.sh
+          bash scripts/test_check_ffmpeg_audio_transcoder.sh
+          bash scripts/test_launch_cpu_restore.sh
+          bash scripts/test_runtime_contracts.sh
+
+      - name: Check current release metadata
+        run: bash scripts/check_release_metadata.sh

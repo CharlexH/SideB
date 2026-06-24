@@ -79,15 +79,14 @@ pub fn render_playlist_overlay(
         );
     } else {
         // Calculate scroll offset to keep selection visible and centered
-        let scroll_offset = if entries.len() <= PLAYLIST_VISIBLE_ITEMS {
-            0
-        } else if selected < PLAYLIST_VISIBLE_ITEMS / 2 {
-            0
-        } else if selected >= entries.len() - PLAYLIST_VISIBLE_ITEMS / 2 {
-            entries.len() - PLAYLIST_VISIBLE_ITEMS
-        } else {
-            selected - PLAYLIST_VISIBLE_ITEMS / 2
-        };
+        let scroll_offset =
+            if entries.len() <= PLAYLIST_VISIBLE_ITEMS || selected < PLAYLIST_VISIBLE_ITEMS / 2 {
+                0
+            } else if selected >= entries.len() - PLAYLIST_VISIBLE_ITEMS / 2 {
+                entries.len() - PLAYLIST_VISIBLE_ITEMS
+            } else {
+                selected - PLAYLIST_VISIBLE_ITEMS / 2
+            };
 
         let list_y_start = PLAYLIST_Y + PLAYLIST_HEADER_HEIGHT + 4;
 
@@ -118,7 +117,7 @@ pub fn render_playlist_overlay(
 
             // Playing indicator
             let text_start_x = PLAYLIST_X + 16;
-            let is_playing = playing_uri.map_or(false, |uri| uri == entry.uri);
+            let is_playing = playing_uri.is_some_and(|uri| uri == entry.uri);
             let triangle_color = playlist_triangle_color(entry_idx == selected);
             if is_playing {
                 draw_playlist_play_triangle(buf, text_start_x, &layout, triangle_color);
@@ -367,6 +366,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_circle_filled(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8, b: u8, a: u8) {
     for dy in -r..=r {
         for dx in -r..=r {
@@ -377,6 +377,7 @@ fn draw_circle_filled(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8, 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_circle_outline(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8, b: u8, a: u8) {
     let inner = (r - 2) * (r - 2); // 2px stroke width
     let outer = r * r;
@@ -391,6 +392,7 @@ fn draw_circle_outline(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8,
 }
 
 /// Draw a pie/fan shape from 12-o'clock clockwise, filled to `progress` (0.0..1.0).
+#[allow(clippy::too_many_arguments)]
 fn draw_pie(buf: &mut [u8], cx: i32, cy: i32, r: i32, progress: f32, red: u8, g: u8, b: u8, a: u8) {
     if progress <= 0.0 {
         return;

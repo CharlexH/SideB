@@ -14,7 +14,8 @@ use crate::favorites::FavoriteEntry;
 
 const PCM_SAMPLE_RATE: i32 = 48_000;
 const PCM_CHANNELS: usize = 2;
-const PCM_RING_SECONDS: usize = 3;
+const LOCAL_PCM_RING_SECONDS: usize = 3;
+const SPOTIFY_PCM_RING_MILLIS: usize = 500;
 const DEFAULT_VOLUME_PERCENT: u32 = 80;
 const MAX_VOLUME_PERCENT: u32 = 100;
 const AUDIO_ROUTE_RETRY_SECONDS: u64 = 5;
@@ -23,7 +24,7 @@ const SPOTIFY_PIPE_PATH_ENV: &str = "SIDEB_SPOTIFY_PIPE";
 const SPOTIFY_PIPE_INPUT_SAMPLE_RATE_ENV: &str = "SIDEB_SPOTIFY_PIPE_SAMPLE_RATE";
 const DEFAULT_SPOTIFY_PIPE_INPUT_SAMPLE_RATE: usize = 44_100;
 const SPOTIFY_ROUTE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-const SPOTIFY_PIPE_IDLE_CLOSE: Duration = Duration::from_millis(1500);
+const SPOTIFY_PIPE_IDLE_CLOSE: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 struct PcmRingBuffer {
@@ -45,6 +46,10 @@ impl PcmRingBuffer {
 
     fn available_samples(&self) -> usize {
         self.available
+    }
+
+    fn capacity_samples(&self) -> usize {
+        self.samples.len()
     }
 
     fn write_samples(&mut self, input: &[i16]) -> usize {
@@ -282,10 +287,22 @@ struct SdlShared {
 
 impl SdlShared {
     fn new(volume_percent: u32) -> Self {
+        Self::with_capacity_samples(
+            PCM_SAMPLE_RATE as usize * PCM_CHANNELS * LOCAL_PCM_RING_SECONDS,
+            volume_percent,
+        )
+    }
+
+    fn new_spotify(volume_percent: u32) -> Self {
+        Self::with_capacity_samples(
+            PCM_SAMPLE_RATE as usize * PCM_CHANNELS * SPOTIFY_PCM_RING_MILLIS / 1000,
+            volume_percent,
+        )
+    }
+
+    fn with_capacity_samples(capacity_samples: usize, volume_percent: u32) -> Self {
         Self {
-            ring: Mutex::new(PcmRingBuffer::new(
-                PCM_SAMPLE_RATE as usize * PCM_CHANNELS * PCM_RING_SECONDS,
-            )),
+            ring: Mutex::new(PcmRingBuffer::new(capacity_samples)),
             producer_eof: AtomicBool::new(false),
             stop_requested: AtomicBool::new(false),
             output_samples: AtomicU64::new(0),
@@ -738,7 +755,9 @@ fn run_spotify_pipe_audio(
         pipe_path, input_sample_rate, PCM_SAMPLE_RATE
     );
 
-    let shared = Arc::new(SdlShared::new(volume_percent.load(Ordering::Relaxed)));
+    let shared = Arc::new(SdlShared::new_spotify(
+        volume_percent.load(Ordering::Relaxed),
+    ));
     let mut output = SpotifySdlOutput::new(Arc::clone(&shared));
     let mut pipe = None;
     let mut bytes = [0u8; 8192];
@@ -1807,6 +1826,27 @@ mod tests {
         let mut remaining = [0i16; 2];
         shared.ring.lock().unwrap().read_samples(&mut remaining);
         assert_eq!(remaining, [3, 4]);
+    }
+
+    #[test]
+    fn spotify_pipe_uses_smaller_low_latency_ring_than_local_playback() {
+        let local = SdlShared::new(DEFAULT_VOLUME_PERCENT);
+        let spotify = SdlShared::new_spotify(DEFAULT_VOLUME_PERCENT);
+
+        let local_capacity = local.ring.lock().unwrap().capacity_samples();
+        let spotify_capacity = spotify.ring.lock().unwrap().capacity_samples();
+
+        assert_eq!(local_capacity, PCM_SAMPLE_RATE as usize * PCM_CHANNELS * 3);
+        assert_eq!(
+            spotify_capacity,
+            PCM_SAMPLE_RATE as usize * PCM_CHANNELS / 2
+        );
+        assert!(spotify_capacity < local_capacity);
+    }
+
+    #[test]
+    fn spotify_pipe_keeps_sdl_output_warm_between_track_loads() {
+        assert!(SPOTIFY_PIPE_IDLE_CLOSE >= Duration::from_secs(10));
     }
 
     #[test]

@@ -55,15 +55,57 @@ append_ld_library_path "$app_dir"
 export LD_LIBRARY_PATH
 
 BACKEND_PID=
+SIDEB_LOCK_DIR=/tmp/sideb-launch.lock
+LOCK_ACQUIRED=0
+SPOTIFY_AUDIO_PIPE=/tmp/sideb-spotify.pcm
+export SIDEB_SPOTIFY_PIPE="$SPOTIFY_AUDIO_PIPE"
+
+acquire_launch_lock() {
+    if ! mkdir "$SIDEB_LOCK_DIR" 2>/dev/null; then
+        echo "launch: SideB is already starting or running" >&2
+        exit 1
+    fi
+    LOCK_ACQUIRED=1
+}
+
+run_spotify_backend_supervisor() {
+    while true; do
+        echo "launch: spotify audio_backend=pipe audio_output_pipe=$SPOTIFY_AUDIO_PIPE" >> /tmp/go-librespot.log
+        status=0
+        /tmp/go-librespot \
+            --config_dir "$SIDEB_DATA_DIR" \
+            --conf "audio_backend=pipe" \
+            --conf "audio_output_pipe=$SPOTIFY_AUDIO_PIPE" \
+            --conf "audio_output_pipe_format=s16le" \
+            --conf "external_volume=true" \
+            >> /tmp/go-librespot.log 2>&1 || status=$?
+        echo "launch: go-librespot exited status=$status; restarting in 1s" >> /tmp/go-librespot.log
+        sleep 1
+    done
+}
+
+start_spotify_backend() {
+    run_spotify_backend_supervisor &
+    BACKEND_PID=$!
+}
+
+prepare_spotify_audio_pipe() {
+    rm -f "$SPOTIFY_AUDIO_PIPE"
+    mkfifo "$SPOTIFY_AUDIO_PIPE"
+}
 
 cleanup() {
     [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null || true
     killall go-librespot 2>/dev/null || true
+    rm -f "$SPOTIFY_AUDIO_PIPE" || true
+    [ "$LOCK_ACQUIRED" = "1" ] && rmdir "$SIDEB_LOCK_DIR" 2>/dev/null || true
 }
 
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+acquire_launch_lock
 
 if [ -f "$SIDEB_RESOURCES_DIR/ca-certificates.crt" ]; then
     export SSL_CERT_FILE="$SIDEB_RESOURCES_DIR/ca-certificates.crt"
@@ -84,8 +126,9 @@ chmod +x /tmp/go-librespot /tmp/sideb
 [ -f "$app_dir/node" ] && cp "$app_dir/node" /tmp/node && chmod +x /tmp/node
 
 mkdir -p "$SIDEB_DATA_DIR"
-/tmp/go-librespot --config_dir "$SIDEB_DATA_DIR" > /tmp/go-librespot.log 2>&1 &
-BACKEND_PID=$!
+: > /tmp/go-librespot.log
+prepare_spotify_audio_pipe
+start_spotify_backend
 
 APP_STATUS=0
 /tmp/sideb 2>/tmp/sideb.log || APP_STATUS=$?

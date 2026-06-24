@@ -2,6 +2,8 @@
 set -euo pipefail
 
 bin_path="${1:-}"
+repo_root=$(cd -- "$(dirname "$0")/.." && pwd)
+manifest_path="${SIDEB_FFMPEG_MANIFEST_PATH:-$repo_root/packaging/shared/LICENSES/THIRD_PARTY_SOURCES.md}"
 
 if [ -z "$bin_path" ]; then
   echo "Usage: $0 <ffmpeg-binary>" >&2
@@ -11,6 +13,45 @@ fi
 if [ ! -x "$bin_path" ]; then
   echo "ERROR: $bin_path is missing or not executable" >&2
   exit 1
+fi
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+ffmpeg_manifest_sha() {
+  awk '
+    $0 == "### FFmpeg" { in_ffmpeg = 1; next }
+    in_ffmpeg && /^### / { in_ffmpeg = 0 }
+    in_ffmpeg && /Bundled binary SHA256:/ {
+      split($0, parts, "`")
+      print parts[2]
+      exit
+    }
+  ' "$manifest_path"
+}
+
+if [ "${SIDEB_SKIP_FFMPEG_MANIFEST_CHECK:-0}" != "1" ]; then
+  if [ ! -f "$manifest_path" ]; then
+    echo "ERROR: FFmpeg third-party manifest is missing: $manifest_path" >&2
+    exit 1
+  fi
+
+  expected_sha=$(ffmpeg_manifest_sha)
+  if [ -z "$expected_sha" ]; then
+    echo "ERROR: FFmpeg bundled SHA256 is missing from $manifest_path" >&2
+    exit 1
+  fi
+
+  actual_sha=$(sha256_file "$bin_path")
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    echo "ERROR: $bin_path SHA256 $actual_sha does not match FFmpeg manifest SHA256 $expected_sha" >&2
+    exit 1
+  fi
 fi
 
 if "$bin_path" -version >/dev/null 2>&1; then

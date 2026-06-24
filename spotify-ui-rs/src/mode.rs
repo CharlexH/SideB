@@ -1,18 +1,13 @@
 /// Application mode — determines UI rendering and input routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppMode {
     /// No Spotify connection, no local playback. Shows waiting screen.
+    #[default]
     Waiting,
     /// Spotify Connect active.
     Spotify,
     /// Playing local downloaded tracks.
     Local,
-}
-
-impl Default for AppMode {
-    fn default() -> Self {
-        Self::Waiting
-    }
 }
 
 /// Actions dispatched from input/network threads to the command processor.
@@ -33,7 +28,7 @@ pub enum InputAction {
     PlaylistDelete,
     LibraryChanged,
     ImportProgress { completed: usize, total: usize },
-    ImportFinished,
+    ImportFinished { failed: usize },
     SpotifyActivated,
     SpotifyDeactivated,
     SpotifyTrackChanged,

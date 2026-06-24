@@ -55,6 +55,7 @@ pub fn blend_pixel(buf: &mut [u8], x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
 }
 
 /// Fill a rectangle with a solid BGRA color.
+#[allow(clippy::too_many_arguments)]
 pub fn fill_rect(buf: &mut [u8], x: i32, y: i32, w: i32, h: i32, r: u8, g: u8, b: u8, a: u8) {
     let x0 = x.max(0) as usize;
     let y0 = y.max(0) as usize;
@@ -152,9 +153,9 @@ pub fn draw_image_scaled(buf: &mut [u8], img: &RgbaImage, center_x: i32, center_
     let src_h = img.height as i32;
 
     // Clip to screen
-    let clip_y0 = 0.max(-start_y) as i32;
+    let clip_y0 = 0.max(-start_y);
     let clip_y1 = size.min(SCREEN_H as i32 - start_y);
-    let clip_x0 = 0.max(-start_x) as i32;
+    let clip_x0 = 0.max(-start_x);
     let clip_x1 = size.min(SCREEN_W as i32 - start_x);
     if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
         return;
@@ -245,6 +246,7 @@ fn heart_contains(px: f64, py: f64) -> bool {
 }
 
 /// Draw a filled heart at (x, y) with given size.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_heart_filled(buf: &mut [u8], x: i32, y: i32, size: i32, r: u8, g: u8, b: u8, a: u8) {
     let half = size as f64 / 2.0;
     for dy in 0..size {
@@ -260,6 +262,7 @@ pub fn draw_heart_filled(buf: &mut [u8], x: i32, y: i32, size: i32, r: u8, g: u8
 }
 
 /// Draw an outline heart at (x, y) with given size.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_heart_outline(buf: &mut [u8], x: i32, y: i32, size: i32, r: u8, g: u8, b: u8, a: u8) {
     let half = size as f64 / 2.0;
     let thickness = 0.12; // border width in normalized coords

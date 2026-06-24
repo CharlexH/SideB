@@ -1,4 +1,6 @@
 #!/bin/sh
+set -eu
+
 progdir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 cd "$progdir" || exit 1
 
@@ -6,7 +8,11 @@ export SIDEB_APP_DIR="$progdir"
 export SIDEB_DATA_DIR="${SIDEB_DATA_DIR:-$progdir/data}"
 export SIDEB_RESOURCES_DIR="${SIDEB_RESOURCES_DIR:-$progdir/resources}"
 
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$progdir:/usr/trimui/lib"
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$progdir:/usr/trimui/lib"
+else
+    export LD_LIBRARY_PATH="$progdir:/usr/trimui/lib"
+fi
 
 CPU_FREQ="${SIDEB_CPU_FREQ_PATH:-/sys/devices/system/cpu/cpu0/cpufreq}"
 CPU_STATE_SAVED=0
@@ -14,18 +20,37 @@ PREV_GOVERNOR=
 PREV_MIN_FREQ=
 PREV_MAX_FREQ=
 BACKEND_PID=
+SIDEB_LOCK_DIR=/tmp/sideb-launch.lock
+LOCK_ACQUIRED=0
 SPOTIFY_AUDIO_PIPE=/tmp/sideb-spotify.pcm
 export SIDEB_SPOTIFY_PIPE="$SPOTIFY_AUDIO_PIPE"
 
+acquire_launch_lock() {
+    if ! mkdir "$SIDEB_LOCK_DIR" 2>/dev/null; then
+        echo "launch: SideB is already starting or running" >&2
+        exit 1
+    fi
+    LOCK_ACQUIRED=1
+}
+
+run_spotify_backend_supervisor() {
+    while true; do
+        echo "launch: spotify audio_backend=pipe audio_output_pipe=$SPOTIFY_AUDIO_PIPE" >> /tmp/go-librespot.log
+        status=0
+        /tmp/go-librespot \
+            --config_dir "$SIDEB_DATA_DIR" \
+            --conf "audio_backend=pipe" \
+            --conf "audio_output_pipe=$SPOTIFY_AUDIO_PIPE" \
+            --conf "audio_output_pipe_format=s16le" \
+            --conf "external_volume=true" \
+            >> /tmp/go-librespot.log 2>&1 || status=$?
+        echo "launch: go-librespot exited status=$status; restarting in 1s" >> /tmp/go-librespot.log
+        sleep 1
+    done
+}
+
 start_spotify_backend() {
-    echo "launch: spotify audio_backend=pipe audio_output_pipe=$SPOTIFY_AUDIO_PIPE" >> /tmp/go-librespot.log
-    /tmp/go-librespot \
-        --config_dir "$SIDEB_DATA_DIR" \
-        --conf "audio_backend=pipe" \
-        --conf "audio_output_pipe=$SPOTIFY_AUDIO_PIPE" \
-        --conf "audio_output_pipe_format=s16le" \
-        --conf "external_volume=true" \
-        >> /tmp/go-librespot.log 2>&1 &
+    run_spotify_backend_supervisor &
     BACKEND_PID=$!
 }
 
@@ -64,18 +89,20 @@ restore_cpu_state() {
 }
 
 cleanup() {
-    [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null
-    killall go-librespot 2>/dev/null
-    rm -f "$SPOTIFY_AUDIO_PIPE"
-    rm -f /tmp/stay_awake
-    rm -f /tmp/stay_alive
-    restore_cpu_state
+    [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null || true
+    killall go-librespot 2>/dev/null || true
+    rm -f "$SPOTIFY_AUDIO_PIPE" || true
+    rm -f /tmp/stay_awake || true
+    rm -f /tmp/stay_alive || true
+    restore_cpu_state || true
+    [ "$LOCK_ACQUIRED" = "1" ] && rmdir "$SIDEB_LOCK_DIR" 2>/dev/null || true
 }
 
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+acquire_launch_lock
 save_cpu_state
 # Use bundled certs if present, otherwise fall back to system certs
 if [ -f "$SIDEB_RESOURCES_DIR/ca-certificates.crt" ]; then
@@ -88,23 +115,35 @@ echo 1 > /tmp/stay_awake
 echo 1 > /tmp/stay_alive
 prepare_usb_audio_host
 
+copy_required_runtime() {
+    cp "$progdir/go-librespot" /tmp/go-librespot
+    cp "$progdir/sideb" /tmp/sideb
+    chmod +x /tmp/go-librespot /tmp/sideb
+}
+
+copy_optional_runtime() {
+    src=$1
+    dest=$2
+    [ -f "$src" ] || return 0
+    cp "$src" "$dest"
+    chmod +x "$dest"
+}
+
 # Kill any existing instances
-killall go-librespot 2>/dev/null
-killall sideb 2>/dev/null
+killall go-librespot 2>/dev/null || true
+killall sideb 2>/dev/null || true
 sleep 1
 echo 1 > /tmp/stay_awake
 echo 1 > /tmp/stay_alive
 prepare_usb_audio_host
 
 # Copy binaries to /tmp (SD card is vfat, can't exec directly)
-cp "$progdir/go-librespot" /tmp/go-librespot
-cp "$progdir/sideb" /tmp/sideb
-chmod +x /tmp/go-librespot /tmp/sideb
+copy_required_runtime
 
 # Copy yt-dlp and the bundled audio transcoder if present
-[ -f "$progdir/yt-dlp" ] && cp "$progdir/yt-dlp" /tmp/yt-dlp && chmod +x /tmp/yt-dlp
-[ -f "$progdir/ffmpeg-lite" ] && cp "$progdir/ffmpeg-lite" /tmp/ffmpeg-lite && chmod +x /tmp/ffmpeg-lite
-[ -f "$progdir/node" ] && cp "$progdir/node" /tmp/node && chmod +x /tmp/node
+copy_optional_runtime "$progdir/yt-dlp" /tmp/yt-dlp
+copy_optional_runtime "$progdir/ffmpeg-lite" /tmp/ffmpeg-lite
+copy_optional_runtime "$progdir/node" /tmp/node
 
 # Start go-librespot backend
 mkdir -p "$SIDEB_DATA_DIR"

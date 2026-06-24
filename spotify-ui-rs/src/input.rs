@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::AppState;
 use crate::constants::*;
@@ -14,6 +15,8 @@ use crate::types::InputEvent;
 const PLAYLIST_REPEAT_DELAY_MS: u64 = 300;
 const PLAYLIST_REPEAT_INTERVAL_MS: u64 = 120;
 const PLAYLIST_REPEAT_POLL_MS: u64 = 30;
+const STARTUP_INPUT_GRACE: Duration = Duration::from_millis(6000);
+const SPOTIFY_SKIP_PENDING_WINDOW: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaylistRepeatDirection {
@@ -25,6 +28,67 @@ enum PlaylistRepeatDirection {
 struct PlaylistRepeatState {
     held_direction: Option<PlaylistRepeatDirection>,
     next_repeat_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct StartupInputGuard {
+    opened_at: Instant,
+    held_keys: HashSet<u16>,
+    held_axes: HashSet<u16>,
+}
+
+impl StartupInputGuard {
+    fn new(opened_at: Instant) -> Self {
+        Self {
+            opened_at,
+            held_keys: HashSet::new(),
+            held_axes: HashSet::new(),
+        }
+    }
+
+    fn should_ignore(&mut self, ev: &InputEvent, now: Instant) -> bool {
+        let in_grace = now.duration_since(self.opened_at) < STARTUP_INPUT_GRACE;
+
+        match ev.event_type {
+            EV_KEY => self.should_ignore_key(ev, in_grace),
+            EV_ABS if matches!(ev.code, ABS_HAT0X | ABS_HAT0Y) => {
+                self.should_ignore_axis(ev, in_grace)
+            }
+            _ => false,
+        }
+    }
+
+    fn should_ignore_key(&mut self, ev: &InputEvent, in_grace: bool) -> bool {
+        if in_grace && ev.value != 0 {
+            self.held_keys.insert(ev.code);
+            return true;
+        }
+
+        if self.held_keys.contains(&ev.code) {
+            if ev.value == 0 {
+                self.held_keys.remove(&ev.code);
+            }
+            return true;
+        }
+
+        false
+    }
+
+    fn should_ignore_axis(&mut self, ev: &InputEvent, in_grace: bool) -> bool {
+        if in_grace && ev.value != 0 {
+            self.held_axes.insert(ev.code);
+            return true;
+        }
+
+        if self.held_axes.contains(&ev.code) {
+            if ev.value == 0 {
+                self.held_axes.remove(&ev.code);
+            }
+            return true;
+        }
+
+        false
+    }
 }
 
 /// Parse a raw 24-byte Linux input_event struct (aarch64 layout).
@@ -106,6 +170,7 @@ fn read_input_device(
 
     eprintln!("reading input from {path}");
     let mut buf = [0u8; 24];
+    let mut startup_guard = StartupInputGuard::new(Instant::now());
 
     loop {
         if quit.load(Ordering::Relaxed) {
@@ -118,6 +183,9 @@ fn read_input_device(
         }
 
         let ev = parse_input_event(&buf);
+        if startup_guard.should_ignore(&ev, Instant::now()) {
+            continue;
+        }
 
         // Only handle key-down events (value == 1) and D-pad
         if ev.event_type == EV_KEY && ev.value != 1 {
@@ -128,12 +196,8 @@ fn read_input_device(
             continue;
         }
 
-        // MENU always exits
-        if ev.event_type == EV_KEY && ev.code == KEY_MENU {
-            eprintln!("exit requested via MENU");
-            let _ = cmd_tx.send(InputAction::ExitApp);
-            quit.store(true, Ordering::Relaxed);
-            return;
+        if handle_menu_exit_input(&ev, &cmd_tx) {
+            continue;
         }
 
         // Read current mode and playlist visibility
@@ -150,6 +214,16 @@ fn read_input_device(
             handle_normal_input(&ev, mode, &state, &cmd_tx, &quit);
         }
     }
+}
+
+fn handle_menu_exit_input(ev: &InputEvent, cmd_tx: &Sender<InputAction>) -> bool {
+    if ev.event_type == EV_KEY && ev.code == KEY_MENU {
+        eprintln!("exit requested via MENU");
+        let _ = cmd_tx.send(InputAction::ExitApp);
+        return true;
+    }
+
+    false
 }
 
 fn playlist_repeat_loop(
@@ -198,18 +272,13 @@ fn handle_playlist_input(
             }
             _ => {}
         }
-    } else if ev.event_type == EV_ABS {
-        match ev.code {
-            ABS_HAT0Y => {
-                let action = repeat_state
-                    .lock()
-                    .unwrap()
-                    .on_axis_value(ev.value, Instant::now());
-                if let Some(action) = action {
-                    let _ = cmd_tx.send(action);
-                }
-            }
-            _ => {}
+    } else if ev.event_type == EV_ABS && ev.code == ABS_HAT0Y {
+        let action = repeat_state
+            .lock()
+            .unwrap()
+            .on_axis_value(ev.value, Instant::now());
+        if let Some(action) = action {
+            let _ = cmd_tx.send(action);
         }
     }
 }
@@ -252,9 +321,9 @@ fn handle_normal_input(
                         // Direct Spotify API call for low latency
                         let paused = state.lock().unwrap().paused;
                         if paused {
-                            network::api_post("/player/resume");
+                            network::api_post_async("/player/resume");
                         } else {
-                            network::api_post("/player/pause");
+                            network::api_post_async("/player/pause");
                         }
                     }
                     AppMode::Local => {
@@ -284,7 +353,11 @@ fn handle_normal_input(
             ABS_HAT0X => {
                 if ev.value < 0 {
                     match mode {
-                        AppMode::Spotify => network::api_post("/player/prev"),
+                        AppMode::Spotify => {
+                            if begin_spotify_skip_pending(state, Instant::now()) {
+                                network::api_post_async("/player/prev");
+                            }
+                        }
                         AppMode::Local => {
                             let _ = cmd_tx.send(InputAction::PrevTrack);
                         }
@@ -292,7 +365,11 @@ fn handle_normal_input(
                     }
                 } else if ev.value > 0 {
                     match mode {
-                        AppMode::Spotify => network::api_post("/player/next"),
+                        AppMode::Spotify => {
+                            if begin_spotify_skip_pending(state, Instant::now()) {
+                                network::api_post_async("/player/next");
+                            }
+                        }
                         AppMode::Local => {
                             let _ = cmd_tx.send(InputAction::NextTrack);
                         }
@@ -303,7 +380,9 @@ fn handle_normal_input(
             ABS_HAT0Y => {
                 if ev.value < 0 {
                     match mode {
-                        AppMode::Spotify => network::api_post_volume(5),
+                        AppMode::Spotify => {
+                            network::api_post_volume_async(5);
+                        }
                         AppMode::Local => {
                             let _ = cmd_tx.send(InputAction::VolumeUp);
                         }
@@ -311,7 +390,9 @@ fn handle_normal_input(
                     }
                 } else if ev.value > 0 {
                     match mode {
-                        AppMode::Spotify => network::api_post_volume(-5),
+                        AppMode::Spotify => {
+                            network::api_post_volume_async(-5);
+                        }
                         AppMode::Local => {
                             let _ = cmd_tx.send(InputAction::VolumeDown);
                         }
@@ -321,6 +402,22 @@ fn handle_normal_input(
             }
             _ => {}
         }
+    }
+}
+
+fn begin_spotify_skip_pending(state: &Arc<Mutex<AppState>>, now: Instant) -> bool {
+    state
+        .lock()
+        .unwrap()
+        .begin_spotify_skip_pending(now, SPOTIFY_SKIP_PENDING_WINDOW)
+}
+
+#[cfg(test)]
+fn spotify_command_notice_message(result: network::ApiCommandResult) -> Option<&'static str> {
+    match result {
+        network::ApiCommandResult::Ok => None,
+        network::ApiCommandResult::Busy => None,
+        network::ApiCommandResult::Offline => Some("Spotify offline"),
     }
 }
 
@@ -489,6 +586,154 @@ mod tests {
         );
 
         assert_eq!(rx.try_recv().unwrap(), InputAction::LockScreen);
+    }
+
+    #[test]
+    fn menu_key_queues_exit_for_command_processor() {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        assert!(handle_menu_exit_input(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: KEY_MENU,
+                value: 1,
+            },
+            &tx
+        ));
+
+        assert_eq!(rx.try_recv().unwrap(), InputAction::ExitApp);
+    }
+
+    #[test]
+    fn startup_input_guard_swallows_launch_button_press() {
+        let opened_at = Instant::now();
+        let mut guard = StartupInputGuard::new(opened_at);
+
+        assert!(guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(999),
+        ));
+    }
+
+    #[test]
+    fn startup_input_guard_swallows_delayed_frontend_launch_button_press() {
+        let opened_at = Instant::now();
+        let mut guard = StartupInputGuard::new(opened_at);
+
+        assert!(guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(3500),
+        ));
+        assert!(guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 0,
+            },
+            opened_at + Duration::from_millis(3600),
+        ));
+        assert!(!guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(6500),
+        ));
+    }
+
+    #[test]
+    fn startup_input_guard_allows_input_after_grace_window() {
+        let opened_at = Instant::now();
+        let mut guard = StartupInputGuard::new(opened_at);
+
+        assert!(!guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(6000),
+        ));
+    }
+
+    #[test]
+    fn startup_input_guard_waits_for_held_button_release_after_grace_window() {
+        let opened_at = Instant::now();
+        let mut guard = StartupInputGuard::new(opened_at);
+
+        assert!(guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(10),
+        ));
+        assert!(guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(6500),
+        ));
+        assert!(guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 0,
+            },
+            opened_at + Duration::from_millis(6600),
+        ));
+        assert!(!guard.should_ignore(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            opened_at + Duration::from_millis(6700),
+        ));
+    }
+
+    #[test]
+    fn spotify_command_busy_notice_is_silent() {
+        assert_eq!(
+            spotify_command_notice_message(network::ApiCommandResult::Busy),
+            None
+        );
+    }
+
+    #[test]
+    fn spotify_skip_pending_dedupes_repeated_skip_commands() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let now = Instant::now();
+
+        assert!(begin_spotify_skip_pending(&state, now));
+        assert!(!begin_spotify_skip_pending(
+            &state,
+            now + Duration::from_secs(2)
+        ));
+        assert!(begin_spotify_skip_pending(
+            &state,
+            now + SPOTIFY_SKIP_PENDING_WINDOW + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn spotify_command_offline_notice_still_reports_offline() {
+        assert_eq!(
+            spotify_command_notice_message(network::ApiCommandResult::Offline),
+            Some("Spotify offline")
+        );
     }
 
     #[test]

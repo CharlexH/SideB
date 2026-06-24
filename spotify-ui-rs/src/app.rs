@@ -49,6 +49,8 @@ pub struct AppState {
     pub soundwave_bars: [f64; 24],
     pub soundwave_goals: [f64; 24],
     pub status_sync_boost_until: Instant,
+    pub spotify_command_pending_until: Option<Instant>,
+    pub spotify_skip_pending_until: Option<Instant>,
     pub render_dirty: bool,
     pub battery_percent: Option<u8>,
     pub battery_charging: bool,
@@ -95,6 +97,8 @@ impl AppState {
             soundwave_bars: bars,
             soundwave_goals: goals,
             status_sync_boost_until: Instant::now(),
+            spotify_command_pending_until: None,
+            spotify_skip_pending_until: None,
             render_dirty: false,
             battery_percent: None,
             battery_charging: false,
@@ -228,6 +232,33 @@ impl AppState {
         self.status_sync_boost_until = now + duration;
     }
 
+    pub fn begin_spotify_command_pending(&mut self, now: Instant, duration: std::time::Duration) {
+        self.spotify_command_pending_until = Some(now + duration);
+    }
+
+    pub fn begin_spotify_skip_pending(
+        &mut self,
+        now: Instant,
+        duration: std::time::Duration,
+    ) -> bool {
+        if self
+            .spotify_skip_pending_until
+            .is_some_and(|pending_until| now < pending_until)
+        {
+            return false;
+        }
+
+        let pending_until = now + duration;
+        self.spotify_command_pending_until = Some(pending_until);
+        self.spotify_skip_pending_until = Some(pending_until);
+        true
+    }
+
+    pub fn clear_spotify_command_pending(&mut self) {
+        self.spotify_command_pending_until = None;
+        self.spotify_skip_pending_until = None;
+    }
+
     pub fn set_paused(&mut self, paused: bool) {
         if self.paused != paused {
             self.paused = paused;
@@ -326,6 +357,7 @@ impl AppState {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

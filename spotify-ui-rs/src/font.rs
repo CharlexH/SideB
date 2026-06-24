@@ -44,6 +44,7 @@ impl FontSet {
     }
 
     /// Draw text onto a BGRA framebuffer at baseline position (x, y).
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_text(
         &self,
         buf: &mut [u8],

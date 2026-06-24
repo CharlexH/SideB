@@ -2,7 +2,7 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, local MP3 playback, and USB DAC output.
 
-Latest release: `v1.2.1`
+Latest release: `v1.2.2`
 
 ## Screenshots 📸
 
@@ -46,7 +46,9 @@ Latest release: `v1.2.1`
 - Browse and manage favorites in the fullscreen `FAV LIST`
 - Play downloaded favorites locally with shuffle, previous, and next track controls
 - Download favorite tracks for personal offline playback
-- Resume pending downloads automatically after restart
+- Resume pending and unfinished favorite downloads automatically after restart
+- Retry an undownloaded `FAV LIST` track manually and move it to the front of the waiting queue
+- Remember the last local track across app restarts
 - Show download progress and short failure notices for network, storage, cookie, YouTube challenge, and missing-tool errors
 - Validate downloaded audio duration against Spotify metadata to reduce mismatched tracks
 
@@ -89,7 +91,7 @@ The app consists of two components:
 
 ### Offline playback pipeline
 
-When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is decoded by bundled `ffmpeg-lite` into PCM and played through SideB's SDL audio callback. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
+When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is decoded by bundled `ffmpeg-lite` into PCM and played through SideB's SDL audio callback. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Pending downloads and unfinished Spotify favorites are automatically resumed on the next app launch. Pressing **A** on an undownloaded `FAV LIST` item retries that track at the front of the waiting queue; the current active download is allowed to finish first.
 
 ### Audio output and USB DACs
 
@@ -151,6 +153,7 @@ support yet.
 2. Press **X** to add the current track to favorites.
 3. Wait for the background download to finish.
 4. Press **A** on the device to start local playback from the downloaded library, or press **Y** to pick a downloaded track from `FAV LIST`.
+5. If a favorite is not downloaded yet, highlight it in `FAV LIST` and press **A** to retry it next.
 
 ### Local uploads
 
@@ -231,7 +234,7 @@ For cookie-related failures:
    ```
 4. Copy `cookies.txt` to the device SD card as `data/yt-dlp-cookies.txt`
 
-Restart SideB and pending downloads will resume automatically.
+Restart SideB and pending downloads will resume automatically. If a favorited Spotify track is not downloaded and no longer appears in the queue, SideB restores it to the queue on startup. To retry a specific undownloaded favorite sooner, highlight it in `FAV LIST` and press **A**; it moves to the front of the waiting queue without interrupting the active download.
 
 > **Why not Chrome?** Since late 2024, Chrome automatically invalidates exported cookies as a security measure. Firefox does not have this limitation.
 
@@ -328,7 +331,7 @@ Before publishing, verify the GitHub release assets after upload:
 ./scripts/check_github_release_assets.sh v<version>
 ```
 
-Current release tag: `v1.2.1`
+Current release tag: `v1.2.2`
 
 ## Repo Layout 🗂️
 

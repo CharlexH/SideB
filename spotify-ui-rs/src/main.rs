@@ -25,14 +25,17 @@ mod resources;
 mod types;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use app::{AppState, Assets};
 use constants::*;
-use download::{DownloadManager, DownloadRequest};
+use download::{download_request_for_incomplete_favorite, DownloadManager, DownloadRequest};
 use favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
 use font::FontSet;
 use framebuffer::Framebuffer;
@@ -42,11 +45,73 @@ use paths::{app_paths, detect_paths, init_paths};
 use render::RenderState;
 
 const SIDEB_AUTOSTART_LOCAL_PLAYBACK_ENV: &str = "SIDEB_AUTOSTART_LOCAL_PLAYBACK";
+const PLAYBACK_STATE_FILE: &str = "playback_state.json";
+const STARTUP_COMMAND_HARD_SUPPRESSION: Duration = Duration::from_secs(10);
+const STARTUP_COMMAND_SOFT_SUPPRESSION: Duration = Duration::from_secs(18);
+const STARTUP_COMMAND_BURST_TAIL: Duration = Duration::from_millis(1500);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct PlaybackState {
+    #[serde(default)]
+    last_local_track_uri: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaylistMove {
     Up,
     Down,
+}
+
+#[derive(Debug)]
+struct StartupCommandGuard {
+    hard_suppress_until: Instant,
+    soft_suppress_until: Instant,
+    last_suppressed_at: Option<Instant>,
+    soft_launch_action_suppressed: bool,
+}
+
+impl StartupCommandGuard {
+    fn new(started_at: Instant) -> Self {
+        Self {
+            hard_suppress_until: started_at + STARTUP_COMMAND_HARD_SUPPRESSION,
+            soft_suppress_until: started_at + STARTUP_COMMAND_SOFT_SUPPRESSION,
+            last_suppressed_at: None,
+            soft_launch_action_suppressed: false,
+        }
+    }
+
+    fn should_suppress(&mut self, action: InputAction, now: Instant) -> bool {
+        if !is_startup_suppressible_input_action(action) {
+            return false;
+        }
+
+        if now < self.hard_suppress_until {
+            return self.record_suppressed(now);
+        }
+
+        if self
+            .last_suppressed_at
+            .map(|last| now.saturating_duration_since(last) < STARTUP_COMMAND_BURST_TAIL)
+            .unwrap_or(false)
+        {
+            return self.record_suppressed(now);
+        }
+
+        if now < self.soft_suppress_until
+            && !self.soft_launch_action_suppressed
+            && is_startup_launch_edge_action(action)
+        {
+            self.soft_launch_action_suppressed = true;
+            return self.record_suppressed(now);
+        }
+
+        false
+    }
+
+    fn record_suppressed(&mut self, now: Instant) -> bool {
+        self.last_suppressed_at = Some(now);
+        true
+    }
 }
 
 fn main() {
@@ -156,18 +221,24 @@ fn main() {
     let download_progress = Arc::clone(download_manager.progress());
 
     battery::refresh_app_state(&app_state);
+    let startup_playback_state = load_playback_state();
 
     // Set initial mode: Local (paused) if favorites exist, else Waiting
     {
         let fav = favorites.lock().unwrap();
         let downloaded = fav.downloaded_entries();
-        if !downloaded.is_empty() {
-            let entry = downloaded[0].clone();
+        if let Some(entry) = select_local_restore_target(
+            &downloaded,
+            startup_playback_state.last_local_track_uri.as_deref(),
+        )
+        .cloned()
+        {
             let mut st = app_state.lock().unwrap();
             st.set_mode(AppMode::Local);
             st.set_paused(true);
             st.track_name = entry.name.clone();
             st.artist_name = entry.artist.clone();
+            st.album_name = entry.album.clone();
             st.current_track_uri = entry.uri.clone();
             st.duration = entry.duration_ms.unwrap_or(0);
             st.position = 0;
@@ -384,6 +455,7 @@ fn main() {
     );
 
     // Stop all playback on exit
+    remember_current_local_track_for_exit(&app_state, &local_player);
     network::api_post("/player/pause");
     {
         let mut player = local_player.lock().unwrap();
@@ -401,6 +473,7 @@ fn main() {
 }
 
 /// Central command processor — receives InputActions and dispatches to subsystems.
+#[allow(clippy::too_many_arguments)]
 fn command_processor(
     rx: mpsc::Receiver<InputAction>,
     app_state: Arc<Mutex<AppState>>,
@@ -413,10 +486,15 @@ fn command_processor(
     quit: Arc<AtomicBool>,
 ) {
     let mut screen_backlight = display::ScreenBacklight::new();
+    let mut startup_command_guard = StartupCommandGuard::new(Instant::now());
 
     for action in rx.iter() {
         if quit.load(Ordering::Relaxed) {
             return;
+        }
+        if startup_command_guard.should_suppress(action, Instant::now()) {
+            eprintln!("input: suppressed startup action {action:?}");
+            continue;
         }
 
         match action {
@@ -479,28 +557,31 @@ fn command_processor(
 
             InputAction::ToggleFavorite => {
                 let (uri, name, artist, album, cover_url, spotify_duration_ms) = {
-                    let st = app_state.lock().unwrap();
-                    match st.mode {
+                    let mode = app_state.lock().unwrap().mode;
+                    match mode {
                         AppMode::Spotify => {
+                            let (uri, name, artist, album, dur) = {
+                                let st = app_state.lock().unwrap();
+                                let dur = if st.duration > 0 {
+                                    Some(st.duration)
+                                } else {
+                                    None
+                                };
+                                (
+                                    st.current_track_uri.clone(),
+                                    st.track_name.clone(),
+                                    st.artist_name.clone(),
+                                    st.album_name.clone(),
+                                    dur,
+                                )
+                            };
                             let cover = render_state
                                 .lock()
                                 .unwrap()
                                 .requested_cover_url
                                 .clone()
                                 .unwrap_or_default();
-                            let dur = if st.duration > 0 {
-                                Some(st.duration)
-                            } else {
-                                None
-                            };
-                            (
-                                st.current_track_uri.clone(),
-                                st.track_name.clone(),
-                                st.artist_name.clone(),
-                                st.album_name.clone(),
-                                cover,
-                                dur,
-                            )
+                            (uri, name, artist, album, cover, dur)
                         }
                         AppMode::Local => {
                             let player = local_player.lock().unwrap();
@@ -708,7 +789,13 @@ fn command_processor(
                 let volume_percent = current_local_volume_percent(&app_state);
                 let mut player = local_player.lock().unwrap();
                 player.set_volume_percent(volume_percent);
-                match player.start_shuffled(downloaded) {
+                let current_uri = app_state.lock().unwrap().current_track_uri.clone();
+                let playback_result = if current_uri.trim().is_empty() {
+                    player.start_shuffled(downloaded)
+                } else {
+                    player.start_shuffled_with_first(downloaded, &current_uri)
+                };
+                match playback_result {
                     Ok(()) => {
                         sync_local_track_to_app(&player, &app_state, &favorites);
 
@@ -831,6 +918,13 @@ fn command_processor(
                                 show_playback_notice(&app_state, error);
                             }
                         }
+                    } else {
+                        if let Some(request) = download_request_for_incomplete_favorite(&entry) {
+                            download_manager.retry_now(request);
+                            show_user_notice(&app_state, "Retry queued");
+                        } else {
+                            show_playlist_unavailable_notice(&app_state, &entry);
+                        }
                     }
                 }
             }
@@ -905,8 +999,8 @@ fn command_processor(
                     .set_import_progress(completed, total);
             }
 
-            InputAction::ImportFinished => {
-                app_state.lock().unwrap().clear_import_progress();
+            InputAction::ImportFinished { failed } => {
+                finish_import_progress(&app_state, failed);
             }
 
             InputAction::SpotifyActivated => {
@@ -1033,6 +1127,18 @@ fn show_playback_notice(app_state: &Arc<Mutex<AppState>>, error: LocalPlaybackEr
     show_user_notice(app_state, error.notice());
 }
 
+fn show_playlist_unavailable_notice(app_state: &Arc<Mutex<AppState>>, _entry: &FavoriteEntry) {
+    show_user_notice(app_state, "Download first");
+}
+
+fn finish_import_progress(app_state: &Arc<Mutex<AppState>>, failed: usize) {
+    let mut st = app_state.lock().unwrap();
+    st.clear_import_progress();
+    if failed > 0 {
+        st.show_notice("Import failed", Instant::now());
+    }
+}
+
 fn advance_playlist_selection(selected: usize, count: usize, movement: PlaylistMove) -> usize {
     if count == 0 {
         return 0;
@@ -1072,14 +1178,110 @@ fn select_local_restore_target<'a>(
         .or_else(|| downloaded.first())
 }
 
+fn playback_state_path() -> PathBuf {
+    app_paths().data_dir.join(PLAYBACK_STATE_FILE)
+}
+
+fn load_playback_state() -> PlaybackState {
+    load_playback_state_from(&playback_state_path())
+}
+
+fn load_playback_state_from(path: &Path) -> PlaybackState {
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(_) => return PlaybackState::default(),
+    };
+
+    match serde_json::from_str::<PlaybackState>(&data) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!(
+                "playback_state: parse error path={} error={e}",
+                path.display()
+            );
+            PlaybackState::default()
+        }
+    }
+}
+
+fn save_playback_state_to(path: &Path, state: &PlaybackState) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let tmp_path = path.with_extension("json.tmp");
+    let json = match serde_json::to_string_pretty(state) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("playback_state: serialize error: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::write(&tmp_path, json) {
+        eprintln!(
+            "playback_state: write tmp failed path={} error={e}",
+            tmp_path.display()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        eprintln!(
+            "playback_state: rename failed path={} error={e}",
+            path.display()
+        );
+    }
+}
+
+fn remember_last_local_track_uri(uri: &str) {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return;
+    }
+    save_playback_state_to(
+        &playback_state_path(),
+        &PlaybackState {
+            last_local_track_uri: Some(uri.to_string()),
+        },
+    );
+}
+
+fn remember_current_local_track_for_exit(
+    app_state: &Arc<Mutex<AppState>>,
+    local_player: &Arc<Mutex<LocalPlayer>>,
+) {
+    let active_player_uri = current_local_track_uri(local_player);
+    let displayed_or_preempted_uri = {
+        let st = app_state.lock().unwrap();
+        if st.mode == AppMode::Local && !st.current_track_uri.trim().is_empty() {
+            Some(st.current_track_uri.clone())
+        } else {
+            st.spotify_preempted_local_uri.clone()
+        }
+    };
+
+    if let Some(uri) = active_player_uri.or(displayed_or_preempted_uri) {
+        remember_last_local_track_uri(&uri);
+    }
+}
+
 /// Remove orphaned files from the music directory that are not referenced by any favorite.
 fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
-    let fav = favorites.lock().unwrap();
-    let referenced = fav.referenced_files();
-    drop(fav);
-
     let music_dir = app_paths().music_dir.clone();
-    let entries = match std::fs::read_dir(&music_dir) {
+    cleanup_orphaned_files_in_dir(favorites, &music_dir);
+}
+
+fn cleanup_orphaned_files_in_dir(favorites: &Arc<Mutex<FavoritesManager>>, music_dir: &Path) {
+    let referenced = {
+        let fav = favorites.lock().unwrap();
+        if !fav.allows_destructive_cleanup() {
+            eprintln!("cleanup: skipped because favorites did not load cleanly from disk");
+            return;
+        }
+        fav.referenced_managed_files(music_dir)
+    };
+
+    let entries = match std::fs::read_dir(music_dir) {
         Ok(entries) => entries,
         Err(_) => return,
     };
@@ -1087,7 +1289,6 @@ fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
     let mut removed = 0u32;
     for entry in entries.flatten() {
         let path = entry.path();
-        let path_str = path.to_string_lossy().to_string();
 
         // Only clean up .mp3 and .jpg files
         match path.extension().and_then(|e| e.to_str()) {
@@ -1095,7 +1296,12 @@ fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
             _ => continue,
         }
 
-        if !referenced.contains(&path_str) {
+        let comparable_path = match path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+
+        if !referenced.contains(&comparable_path) {
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!("cleanup: failed to remove {}: {e}", path.display());
             } else {
@@ -1190,6 +1396,7 @@ fn refresh_library_state(
 
     let mut seed_entry: Option<FavoriteEntry> = None;
     let mut clear_cover = false;
+    let persisted_last_local_uri = load_playback_state().last_local_track_uri;
     {
         let player_active = local_player.lock().unwrap().is_active();
         let mut st = app_state.lock().unwrap();
@@ -1208,7 +1415,14 @@ fn refresh_library_state(
         let current_still_downloaded = current_entry.is_some();
 
         if !player_active && st.mode != AppMode::Spotify {
-            if let Some(entry) = downloaded.first() {
+            let restore_entry = if current_still_downloaded {
+                current_entry.clone()
+            } else {
+                select_local_restore_target(&downloaded, persisted_last_local_uri.as_deref())
+                    .cloned()
+            };
+
+            if let Some(entry) = restore_entry {
                 if current_uri.is_empty() || !current_still_downloaded {
                     st.set_mode(AppMode::Local);
                     st.set_paused(true);
@@ -1273,15 +1487,19 @@ fn sync_local_track_to_app(
     favorites: &Arc<Mutex<FavoritesManager>>,
 ) {
     if let Some(entry) = player.current_entry() {
+        let uri = entry.uri.clone();
         let mut st = app_state.lock().unwrap();
-        st.current_track_uri = entry.uri.clone();
+        st.current_track_uri = uri.clone();
         st.track_name = entry.name.clone();
         st.artist_name = entry.artist.clone();
         st.album_name = entry.album.clone();
         st.set_duration(entry.duration_ms.unwrap_or(0));
         st.set_position(player.position_ms(), Instant::now());
         let fav = favorites.lock().unwrap();
-        st.set_favorited(fav.is_favorited(&entry.uri));
+        st.set_favorited(fav.is_favorited(&uri));
+        drop(fav);
+        drop(st);
+        remember_last_local_track_uri(&uri);
     }
 }
 
@@ -1381,6 +1599,39 @@ fn autostart_local_playback_enabled(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn is_startup_suppressible_input_action(action: InputAction) -> bool {
+    matches!(
+        action,
+        InputAction::ToggleFavorite
+            | InputAction::TogglePlayPause
+            | InputAction::NextTrack
+            | InputAction::PrevTrack
+            | InputAction::VolumeUp
+            | InputAction::VolumeDown
+            | InputAction::StartLocalPlayback
+            | InputAction::StopLocalPlayback
+            | InputAction::TogglePlaylist
+            | InputAction::PlaylistUp
+            | InputAction::PlaylistDown
+            | InputAction::PlaylistSelect
+            | InputAction::PlaylistDelete
+            | InputAction::LockScreen
+            | InputAction::UnlockScreen
+            | InputAction::RequestExit
+            | InputAction::ExitApp
+    )
+}
+
+fn is_startup_launch_edge_action(action: InputAction) -> bool {
+    matches!(
+        action,
+        InputAction::TogglePlayPause
+            | InputAction::StartLocalPlayback
+            | InputAction::RequestExit
+            | InputAction::ExitApp
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,6 +1690,64 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_orphaned_files_skips_when_favorites_failed_to_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "sideb-cleanup-corrupt-favorites-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let music_dir = dir.join("music");
+        std::fs::create_dir_all(&music_dir).unwrap();
+        let favorites_path = dir.join("favorites.json");
+        let orphan = music_dir.join("orphan.mp3");
+        std::fs::write(&favorites_path, b"{not valid json").unwrap();
+        std::fs::write(&orphan, b"mp3").unwrap();
+
+        let favorites = Arc::new(Mutex::new(FavoritesManager::load(&favorites_path)));
+
+        cleanup_orphaned_files_in_dir(&favorites, &music_dir);
+
+        assert!(orphan.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unavailable_playlist_entry_sets_user_notice() {
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        let mut entry = test_entry("track:queued");
+        entry.downloaded = false;
+        entry.file_path = None;
+
+        show_playlist_unavailable_notice(&app_state, &entry);
+
+        assert_eq!(
+            app_state
+                .lock()
+                .unwrap()
+                .active_notice_message(Instant::now()),
+            Some("Download first".to_string())
+        );
+    }
+
+    #[test]
+    fn import_finish_with_failures_shows_notice() {
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        app_state.lock().unwrap().set_import_progress(1, 2);
+
+        finish_import_progress(&app_state, 1);
+
+        let mut st = app_state.lock().unwrap();
+        assert_eq!(st.import_progress, None);
+        assert_eq!(
+            st.active_notice_message(Instant::now()),
+            Some("Import failed".to_string())
+        );
+    }
+
+    #[test]
     fn playlist_selection_wraps_up_from_first_item() {
         assert_eq!(advance_playlist_selection(0, 4, PlaylistMove::Up), 3);
     }
@@ -1462,6 +1771,62 @@ mod tests {
         assert!(!autostart_local_playback_enabled(Some("0")));
         assert!(!autostart_local_playback_enabled(Some("")));
         assert!(!autostart_local_playback_enabled(None));
+    }
+
+    #[test]
+    fn startup_command_guard_blocks_hardware_playback_actions_during_hard_window() {
+        let now = Instant::now();
+        let mut guard = StartupCommandGuard::new(now);
+
+        assert!(guard.should_suppress(InputAction::TogglePlayPause, now));
+        assert!(guard.should_suppress(
+            InputAction::StartLocalPlayback,
+            now + Duration::from_millis(5500)
+        ));
+        assert!(!guard.should_suppress(
+            InputAction::SpotifyActivated,
+            now + Duration::from_millis(5600)
+        ));
+        assert!(!guard.should_suppress(
+            InputAction::ImportFinished { failed: 0 },
+            now + Duration::from_millis(5700)
+        ));
+    }
+
+    #[test]
+    fn startup_command_suppression_blocks_delayed_frontend_launch_burst() {
+        let now = Instant::now();
+        let mut guard = StartupCommandGuard::new(now);
+
+        assert!(guard.should_suppress(
+            InputAction::TogglePlayPause,
+            now + Duration::from_millis(8500)
+        ));
+        assert!(guard.should_suppress(
+            InputAction::RequestExit,
+            now + Duration::from_millis(10_800)
+        ));
+        assert!(guard.should_suppress(
+            InputAction::RequestExit,
+            now + Duration::from_millis(11_200)
+        ));
+        assert!(!guard.should_suppress(
+            InputAction::TogglePlayPause,
+            now + Duration::from_millis(13_000)
+        ));
+    }
+
+    #[test]
+    fn startup_command_suppression_swallows_first_late_launch_edge_action() {
+        let now = Instant::now();
+        let mut guard = StartupCommandGuard::new(now);
+
+        assert!(guard.should_suppress(InputAction::TogglePlayPause, now + Duration::from_secs(14)));
+        assert!(guard.should_suppress(
+            InputAction::RequestExit,
+            now + Duration::from_millis(14_500)
+        ));
+        assert!(!guard.should_suppress(InputAction::TogglePlayPause, now + Duration::from_secs(17)));
     }
 
     #[test]
@@ -1503,5 +1868,42 @@ mod tests {
         let downloaded = vec![test_entry("track:1")];
         let target = select_local_restore_target(&downloaded, None).map(|entry| entry.uri.clone());
         assert_eq!(target.as_deref(), Some("track:1"));
+    }
+
+    #[test]
+    fn playback_state_round_trips_last_local_track_uri() {
+        let dir = temp_test_dir("playback-state-roundtrip");
+        let path = dir.join("playback_state.json");
+        let state = PlaybackState {
+            last_local_track_uri: Some("track:remembered".to_string()),
+        };
+
+        save_playback_state_to(&path, &state);
+
+        assert_eq!(load_playback_state_from(&path), state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playback_state_parse_error_falls_back_to_default() {
+        let dir = temp_test_dir("playback-state-corrupt");
+        let path = dir.join("playback_state.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, b"{not-json").unwrap();
+
+        assert_eq!(load_playback_state_from(&path), PlaybackState::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "sideb-main-{prefix}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        dir
     }
 }
