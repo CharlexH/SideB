@@ -121,6 +121,6 @@ mod tests {
         let descent = font.descent_unscaled();
         let height = ascent - descent;
         eprintln!("units_per_em={upem}, ascent={ascent}, descent={descent}, height={height}");
-        eprintln!("ratio height/upem = {}", height / upem as f32);
+        eprintln!("ratio height/upem = {}", height / upem);
     }
 }
