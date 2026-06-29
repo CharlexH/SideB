@@ -48,7 +48,7 @@ Latest release: `v1.2.2`
 - Download favorite tracks for personal offline playback
 - Resume pending and unfinished favorite downloads automatically after restart
 - Retry an undownloaded `FAV LIST` track manually and move it to the front of the waiting queue
-- Remember the last local track across app restarts
+- Remember the last local track across app restarts and after Spotify disconnects
 - Show download progress and short failure notices for network, storage, cookie, YouTube challenge, and missing-tool errors
 - Validate downloaded audio duration against Spotify metadata to reduce mismatched tracks
 

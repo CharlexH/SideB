@@ -1062,9 +1062,14 @@ fn command_processor(
                     )
                 };
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
+                let last_local_uri = load_playback_state().last_local_track_uri;
 
-                if let Some(entry) =
-                    select_local_restore_target(&downloaded, remembered_uri.as_deref()).cloned()
+                if let Some(entry) = select_spotify_deactivation_restore_target(
+                    &downloaded,
+                    remembered_uri.as_deref(),
+                    last_local_uri.as_deref(),
+                )
+                .cloned()
                 {
                     let mut st = app_state.lock().unwrap();
                     st.set_mode(AppMode::Local);
@@ -1175,6 +1180,17 @@ fn select_local_restore_target<'a>(
 ) -> Option<&'a FavoriteEntry> {
     remembered_uri
         .and_then(|uri| downloaded.iter().find(|entry| entry.uri == uri))
+        .or_else(|| downloaded.first())
+}
+
+fn select_spotify_deactivation_restore_target<'a>(
+    downloaded: &'a [FavoriteEntry],
+    preempted_uri: Option<&str>,
+    last_local_uri: Option<&str>,
+) -> Option<&'a FavoriteEntry> {
+    preempted_uri
+        .and_then(|uri| downloaded.iter().find(|entry| entry.uri == uri))
+        .or_else(|| last_local_uri.and_then(|uri| downloaded.iter().find(|entry| entry.uri == uri)))
         .or_else(|| downloaded.first())
 }
 
@@ -1833,6 +1849,14 @@ mod tests {
     fn local_restore_target_prefers_preempted_uri() {
         let downloaded = vec![test_entry("track:1"), test_entry("track:2")];
         let target = select_local_restore_target(&downloaded, Some("track:2"))
+            .map(|entry| entry.uri.clone());
+        assert_eq!(target.as_deref(), Some("track:2"));
+    }
+
+    #[test]
+    fn spotify_deactivation_restore_target_uses_last_local_track_before_first_downloaded() {
+        let downloaded = vec![test_entry("track:1"), test_entry("track:2")];
+        let target = select_spotify_deactivation_restore_target(&downloaded, None, Some("track:2"))
             .map(|entry| entry.uri.clone());
         assert_eq!(target.as_deref(), Some("track:2"));
     }
